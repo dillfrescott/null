@@ -35,11 +35,12 @@ struct LogMessage {
     ip_address: Option<String>,
     features_json: String,
     points_hash: String,
+    is_high_confidence: bool,
 }
 
 /// Application state containing neural network, database connection, and security configurations
 struct AppState {
-    model: model::MLP,
+    model: Arc<std::sync::RwLock<model::MLP>>,
     _db_conn: std::sync::Mutex<rusqlite::Connection>,
     secret_key: Vec<u8>,
     min_score: f32,
@@ -137,7 +138,7 @@ async fn main() {
 
     // 2. Load or train the Neural Network model
     info!("Checking database for existing trained neural network weights...");
-    let model = match db::load_model(&db_conn) {
+    let raw_model = match db::load_model(&db_conn) {
         Ok(Some(loaded)) => {
             info!("Loaded trained neural network weights from database.");
             loaded
@@ -154,6 +155,8 @@ async fn main() {
         }
     };
     info!("Neural Network model ready. (Input: 8, Hidden1: 12, Hidden2: 8, Output: 1)");
+
+    let model = Arc::new(std::sync::RwLock::new(raw_model));
 
     // 3. Read Configuration
     let port = std::env::var("PORT")
@@ -182,12 +185,15 @@ async fn main() {
     // Setup asynchronous background telemetry logger to prevent SQLite write lock blocks
     let (log_tx, mut log_rx) = tokio::sync::mpsc::channel::<LogMessage>(5000);
     let db_path_clone = db_path.clone();
+    let model_clone = Arc::clone(&model);
     tokio::spawn(async move {
         if let Ok(conn) = rusqlite::Connection::open(&db_path_clone) {
             // Prune old tokens once on startup
             let _ = db::prune_old_tokens(&conn, 300);
 
             let mut last_prune = std::time::Instant::now();
+            let mut logged_interactions_count = 0;
+            
             while let Some(msg) = log_rx.recv().await {
                 let _ = db::log_telemetry(
                     &conn,
@@ -199,7 +205,78 @@ async fn main() {
                     msg.ip_address.as_deref(),
                     &msg.features_json,
                     &msg.points_hash,
+                    msg.is_high_confidence,
                 );
+
+                // Increment logged interaction counter for adaptive training
+                if !msg.features_json.is_empty() && msg.is_high_confidence {
+                    logged_interactions_count += 1;
+                }
+
+                // Periodically retrain and adapt the model (every 10 new logged interactions)
+                if logged_interactions_count >= 10 {
+                    info!("Adapting neural network: retraining model on recent telemetry logs + synthetic dataset...");
+                    
+                    // Fetch recent logs
+                    match db::get_recent_telemetry(&conn, 500) {
+                        Ok(mut recent_data) => {
+                            info!("Fetched {} recent telemetry samples from database.", recent_data.len());
+                            
+                            // Generate synthetic dataset to avoid overfitting/catastrophic forgetting
+                            let mut dataset = model::MLP::generate_synthetic_dataset();
+                            
+                            // Combine them
+                            dataset.append(&mut recent_data);
+                            
+                            // Shuffle and split into train (90%) and validation (10%) datasets
+                            use rand::seq::SliceRandom;
+                            let mut rng = rand::thread_rng();
+                            dataset.shuffle(&mut rng);
+                            let val_size = dataset.len() / 10;
+                            let val_dataset = dataset[0..val_size].to_vec();
+                            let train_dataset = dataset[val_size..].to_vec();
+
+                            // Train a fresh model from scratch on the combined dataset in the background (no locks held)
+                            // This completely avoids weight drift / catastrophic forgetting.
+                            let mut new_model = model::MLP::new_random();
+                            let loss = new_model.train(&train_dataset, 150, 0.04);
+                            
+                            // Validate model accuracy and verify numerical sanity before promotion
+                            let accuracy = new_model.validate(&val_dataset);
+                            let is_sane = new_model.is_sane();
+
+                            if is_sane && accuracy >= 0.90 {
+                                info!("Model retraining succeeded. Loss: {:.6}, Validation Accuracy: {:.2}%", loss, accuracy * 100.0);
+                                
+                                // Swap the model under a brief write lock (minimal block time)
+                                {
+                                    let mut model_guard = model_clone.write().unwrap();
+                                    *model_guard = new_model;
+                                }
+                                
+                                // Save the updated model weights back to the database
+                                {
+                                    let model_guard = model_clone.read().unwrap();
+                                    if let Err(e) = db::save_model(&conn, &model_guard) {
+                                        warn!("Failed to save adapted model weights to database: {}", e);
+                                    } else {
+                                        info!("Adapted model weights successfully saved/persisted to database.");
+                                    }
+                                }
+                            } else {
+                                warn!(
+                                    "Rejected retrained model update! Sanity check: {}, Validation Accuracy: {:.2}% (threshold: 90.0%)",
+                                    if is_sane { "PASSED" } else { "FAILED" },
+                                    accuracy * 100.0
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to load telemetry for adaptation: {}", e);
+                        }
+                    }
+                    logged_interactions_count = 0;
+                }
 
                 // Periodically prune tokens every 5 minutes
                 if last_prune.elapsed().as_secs() > 300 {
@@ -540,10 +617,10 @@ async fn verify_handler(
     let features_opt = features::extract_features(&mouse_points);
     
     let mut features_json = String::new();
-    if let Some(features) = features_opt {
+    if let Some(ref features) = features_opt {
         features_json = serde_json::to_string(&features).unwrap_or_default();
         let feature_arr = features.to_array();
-        let mut model_score = state.model.predict(&feature_arr);
+        let mut model_score = state.model.read().unwrap().predict(&feature_arr);
         
         if client_data.plugins == 0 {
             model_score = (model_score - 0.25).max(0.0);
@@ -622,7 +699,7 @@ async fn verify_handler(
                 if valid_drag_dist {
                     if let Some(features) = features::extract_features(&mouse_points) {
                         let feature_arr = features.to_array();
-                        let drag_score = state.model.predict(&feature_arr);
+                        let drag_score = state.model.read().unwrap().predict(&feature_arr);
                         if drag_score >= 0.25 {
                             score = drag_score;
                             is_human = true;
@@ -648,6 +725,30 @@ async fn verify_handler(
         .and_then(|v| v.to_str().ok().map(|s| s.split(',').next().unwrap_or("").trim().to_string()))
         .unwrap_or_else(|| addr.ip().to_string());
 
+    let is_high_confidence = if bot_flag {
+        true
+    } else if payload.slider_x.is_some() {
+        if !is_accessibility {
+            if is_human {
+                // Only mark as high confidence human if mouse features exhibit typical human variance
+                if let Some(ref features) = features_opt {
+                    features.speed_var >= 0.08 &&
+                    features.total_duration >= 0.075 && // 0.075 is 150ms normalized (duration / 2000.0)
+                    (features.angular_jitter >= 0.005 || features.line_deviation >= 0.001)
+                } else {
+                    false
+                }
+            } else {
+                // If they solved the slider but drag features were classified as bot-like, it is likely a bot solver
+                true
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     // Send log message to background channel for async persistence (non-blocking)
     let log_msg = LogMessage {
         point_count: client_data.points.len(),
@@ -658,6 +759,7 @@ async fn verify_handler(
         ip_address: Some(ip_address),
         features_json,
         points_hash,
+        is_high_confidence,
     };
     let _ = state.log_tx.try_send(log_msg);
 

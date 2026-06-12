@@ -27,14 +27,19 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
             user_agent TEXT,
             ip_address TEXT,
             features_json TEXT NOT NULL,
-            points_hash TEXT NOT NULL DEFAULT ''
+            points_hash TEXT NOT NULL DEFAULT '',
+            is_high_confidence INTEGER NOT NULL DEFAULT 0
         )",
         [],
     )?;
 
-    // Try to alter table to add the column if it doesn't exist (ignoring errors if it already exists)
+    // Try to alter table to add the columns if they don't exist (ignoring errors if they already exist)
     let _ = conn.execute(
         "ALTER TABLE telemetry_logs ADD COLUMN points_hash TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE telemetry_logs ADD COLUMN is_high_confidence INTEGER NOT NULL DEFAULT 0",
         [],
     );
 
@@ -105,6 +110,7 @@ pub fn log_telemetry(
     ip_address: Option<&str>,
     features_json: &str,
     points_hash: &str,
+    is_high_confidence: bool,
 ) -> Result<(), String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -112,8 +118,8 @@ pub fn log_telemetry(
         .as_secs() as i64;
 
     conn.execute(
-        "INSERT INTO telemetry_logs (timestamp, point_count, score, is_human, webdriver, user_agent, ip_address, features_json, points_hash)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO telemetry_logs (timestamp, point_count, score, is_human, webdriver, user_agent, ip_address, features_json, points_hash, is_high_confidence)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             now,
             point_count as i64,
@@ -123,7 +129,8 @@ pub fn log_telemetry(
             user_agent,
             ip_address,
             features_json,
-            points_hash
+            points_hash,
+            if is_high_confidence { 1 } else { 0 }
         ],
     ).map_err(|e| format!("Failed to insert telemetry log: {}", e))?;
 
@@ -201,3 +208,86 @@ pub fn prune_old_tokens(conn: &Connection, max_age_secs: u64) -> Result<usize, S
 
     Ok(deleted)
 }
+
+/// Get the most recent telemetry logs from the database to use as training data.
+pub fn get_recent_telemetry(conn: &Connection, limit: usize) -> Result<Vec<([f32; 8], f32)>, String> {
+    let mut stmt = conn
+        .prepare("SELECT features_json, is_human FROM telemetry_logs WHERE is_high_confidence = 1 ORDER BY id DESC LIMIT ?1")
+        .map_err(|e| format!("Prepare query failed: {}", e))?;
+
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        let features_json: String = row.get(0)?;
+        let is_human_int: i32 = row.get(1)?;
+        let target = if is_human_int > 0 { 1.0f32 } else { 0.0f32 };
+        Ok((features_json, target))
+    }).map_err(|e| format!("Query telemetry failed: {}", e))?;
+
+    let mut data = Vec::new();
+    for row in rows {
+        if let Ok((features_json, target)) = row {
+            if let Ok(features) = serde_json::from_str::<crate::features::FeatureVector>(&features_json) {
+                data.push((features.to_array(), target));
+            }
+        }
+    }
+    Ok(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::features::FeatureVector;
+
+    #[test]
+    fn test_log_and_get_recent_telemetry_high_confidence() {
+        let conn = init_db(":memory:").unwrap();
+        
+        let features = FeatureVector {
+            straightness: 0.8,
+            avg_speed: 0.4,
+            speed_var: 0.2,
+            angular_jitter: 0.1,
+            total_duration: 0.5,
+            line_deviation: 0.05,
+            point_count: 0.6,
+            entropy: 0.3,
+        };
+        let features_json = serde_json::to_string(&features).unwrap();
+
+        // 1. Log a low confidence telemetry entry
+        log_telemetry(
+            &conn,
+            20,
+            0.9,
+            true,
+            false,
+            Some("Mozilla"),
+            Some("127.0.0.1"),
+            &features_json,
+            "hash1",
+            false, // is_high_confidence
+        ).unwrap();
+
+        // 2. Log a high confidence telemetry entry
+        log_telemetry(
+            &conn,
+            25,
+            0.95,
+            true,
+            false,
+            Some("Mozilla"),
+            Some("127.0.0.1"),
+            &features_json,
+            "hash2",
+            true, // is_high_confidence
+        ).unwrap();
+
+        // Retrieve telemetry for training
+        let dataset = get_recent_telemetry(&conn, 10).unwrap();
+        
+        // Assert only the high confidence record is returned
+        assert_eq!(dataset.len(), 1);
+        assert_eq!(dataset[0].1, 1.0); // is_human target
+    }
+}
+

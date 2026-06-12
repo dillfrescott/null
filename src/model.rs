@@ -171,6 +171,36 @@ impl MLP {
         total_loss
     }
 
+    /// Evaluate the model's classification accuracy on a dataset.
+    pub fn validate(&self, dataset: &[([f32; 8], f32)]) -> f32 {
+        if dataset.is_empty() {
+            return 0.0;
+        }
+        let mut correct = 0;
+        for (x, target) in dataset {
+            let pred = self.predict(x);
+            let pred_label = if pred >= 0.5 { 1.0 } else { 0.0 };
+            if (pred_label - target).abs() < 0.01 {
+                correct += 1;
+            }
+        }
+        correct as f32 / dataset.len() as f32
+    }
+
+    /// Check if the weights and biases are sane (contain no NaN or infinite values).
+    pub fn is_sane(&self) -> bool {
+        let check_vec = |v: &[f32]| v.iter().all(|&x| x.is_finite());
+        let check_matrix = |m: &[Vec<f32>]| m.iter().all(|row| check_vec(row));
+        
+        check_matrix(&self.w1)
+            && check_vec(&self.b1)
+            && check_matrix(&self.w2)
+            && check_vec(&self.b2)
+            && check_vec(&self.w3)
+            && self.b3.is_finite()
+    }
+
+
     /// Generates synthetic training data for humans and bots.
     /// This is used to initialize the model if no pre-trained weights exist.
     pub fn generate_synthetic_dataset() -> Vec<([f32; 8], f32)> {
@@ -285,3 +315,24 @@ impl MLP {
         model
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mlp_validation_and_sanity() {
+        let model = MLP::new_default();
+        assert!(model.is_sane());
+        
+        let dataset = MLP::generate_synthetic_dataset();
+        let accuracy = model.validate(&dataset);
+        assert!(accuracy >= 0.90, "Accuracy was too low: {}", accuracy);
+        
+        // Corrupt model with NaN to test is_sane
+        let mut corrupted_model = model;
+        corrupted_model.b3 = f32::NAN;
+        assert!(!corrupted_model.is_sane());
+    }
+}
+
