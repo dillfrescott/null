@@ -363,6 +363,17 @@
                     }
                 });
             }
+
+            // Dynamically update server URL references to match current hosting origin
+            const currentOrigin = window.location.origin;
+            const scriptBlock = document.getElementById("integration-script-block");
+            const validateBlock = document.getElementById("integration-validate-block");
+            if (scriptBlock) {
+                scriptBlock.textContent = `<script src="${currentOrigin}/js/null.js" async defer><\/script>`;
+            }
+            if (validateBlock) {
+                validateBlock.textContent = `// Request\nPOST ${currentOrigin}/api/validate\nContent-Type: application/json\n{ "token": "timestamp.score.nonce.signature" }\n\n// Success Response\n{ "success": true, "score": 1.0 }`;
+            }
         });
     </script>
 
@@ -421,7 +432,7 @@
                 <div>
                     <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; font-weight: 600; color: #ffffff;">1. Include the Client Script</h4>
                     <p style="color: var(--text-secondary); font-size: 0.85rem; margin: 0 0 0.5rem 0;">Add this script tag in your HTML <code style="color: #ffffff; background: #222; padding: 2px 4px; border-radius: 3px; font-family: monospace;">&lt;head&gt;</code> or body:</p>
-                    <pre style="background: #111; border: 1px solid #222; padding: 0.75rem; border-radius: 6px; overflow-x: auto; margin: 0; font-size: 0.8rem; color: #a9ffb4; font-family: monospace;">&lt;script src="https://null.dill.moe/js/null.js" async defer&gt;&lt;/script&gt;</pre>
+                    <pre id="integration-script-block" style="background: #111; border: 1px solid #222; padding: 0.75rem; border-radius: 6px; overflow-x: auto; margin: 0; font-size: 0.8rem; color: #a9ffb4; font-family: monospace;">&lt;script src="https://null.dill.moe/js/null.js" async defer&gt;&lt;/script&gt;</pre>
                 </div>
 
                 <!-- Step 2 -->
@@ -452,7 +463,7 @@
                 <div>
                     <h4 style="margin: 0 0 0.5rem 0; font-size: 1rem; font-weight: 600; color: #ffffff;">4. Validate on Backend</h4>
                     <p style="color: var(--text-secondary); font-size: 0.85rem; margin: 0 0 0.5rem 0;">From your server, verify the token by making a POST request:</p>
-                    <pre style="background: #111; border: 1px solid #222; padding: 0.75rem; border-radius: 6px; overflow-x: auto; margin: 0; font-size: 0.8rem; color: #ffbc7d; line-height: 1.4; font-family: monospace;">// Request
+                    <pre id="integration-validate-block" style="background: #111; border: 1px solid #222; padding: 0.75rem; border-radius: 6px; overflow-x: auto; margin: 0; font-size: 0.8rem; color: #ffbc7d; line-height: 1.4; font-family: monospace;">// Request
 POST https://null.dill.moe/api/validate
 Content-Type: application/json
 { "token": "timestamp.score.nonce.signature" }

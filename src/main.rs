@@ -24,6 +24,7 @@ mod cache;
 // Embed frontend assets directly into the binary
 const INDEX_HTML: &str = include_str!("static/index.html");
 const NULL_JS: &str = include_str!("static/null.js");
+const LLMS_TXT: &str = include_str!("static/llms.txt");
 
 struct LogMessage {
     point_count: usize,
@@ -222,6 +223,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(serve_index))
         .route("/js/null.js", get(serve_js))
+        .route("/llms.txt", get(serve_llms))
         .route("/api/challenge", get(challenge_handler))
         .route("/api/verify", post(verify_handler))
         .route("/api/validate", post(validate_handler))
@@ -248,6 +250,14 @@ async fn serve_js() -> impl IntoResponse {
     Response::builder()
         .header(header::CONTENT_TYPE, HeaderValue::from_static("application/javascript"))
         .body(NULL_JS.to_string())
+        .unwrap()
+}
+
+/// Serve the llms.txt guide for AI agents
+async fn serve_llms() -> impl IntoResponse {
+    Response::builder()
+        .header(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"))
+        .body(LLMS_TXT.to_string())
         .unwrap()
 }
 

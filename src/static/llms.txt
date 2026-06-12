@@ -1,0 +1,138 @@
+# Null CAPTCHA
+
+Null CAPTCHA is a modern, lightweight, privacy-focused behavioral analysis CAPTCHA. It uses machine learning (a neural network implemented in Rust) to analyze mouse movements, keystrokes, and touch telemetry to detect bots in real-time without annoying puzzles.
+
+## Client-Side Integration
+
+To add the Null CAPTCHA widget to a webpage, follow these steps:
+
+1. **Include the JS Client Library**
+   Add the following `<script>` tag inside your HTML `<head>` or at the end of the `<body>` (replace `<your-null-domain>` with the active domain of the running CAPTCHA server):
+   ```html
+   <script src="https://<your-null-domain>/js/null.js" async defer></script>
+   ```
+
+2. **Add the Widget Container**
+   Add a placeholder `<div>` with a unique ID inside your HTML form where you want the checkbox to appear:
+   ```html
+   <div id="null-captcha-widget"></div>
+   ```
+
+3. **Initialize the Widget**
+   Render the captcha widget once the window loads or the DOM is ready. Provide `onSuccess` and `onFailure` callbacks:
+   ```javascript
+   window.addEventListener('load', () => {
+       window.NullCaptcha.render('null-captcha-widget', {
+           onSuccess: (token) => {
+               // The token must be sent to your backend for validation (e.g., via a hidden input or AJAX payload).
+               console.log("CAPTCHA Verified! Token:", token);
+               
+               // Example: Set value of a hidden form input
+               const input = document.createElement('input');
+               input.type = 'hidden';
+               input.name = 'null-captcha-token';
+               input.value = token;
+               
+               const form = document.querySelector('form'); // select your form
+               form.appendChild(input);
+           },
+           onFailure: (error) => {
+               console.error("CAPTCHA Verification Failed:", error);
+           }
+       });
+   });
+   ```
+
+## Server-Side Validation
+
+When the form is submitted to your backend, you must verify the token with the Null CAPTCHA server to prevent replay attacks and confirm authenticity.
+
+1. **Send POST Request to /api/validate**
+   Endpoint: `https://<your-null-domain>/api/validate`
+   Method: `POST`
+   Content-Type: `application/json`
+
+   **Request Payload:**
+   ```json
+   {
+       "token": "<token-received-from-client>"
+   }
+   ```
+
+2. **Handle the JSON Response**
+   The endpoint responds with:
+   - **Success (Score meets the threshold):**
+     ```json
+     {
+         "success": true,
+         "score": 1.0,
+         "error": null
+     }
+     ```
+   - **Failure (Score too low, token expired, or replayed):**
+     ```json
+     {
+         "success": false,
+         "score": 0.0,
+         "error": "Error message explanation here"
+     }
+     ```
+
+### Validation Examples
+
+#### Node.js (fetch)
+```javascript
+async function verifyCaptcha(token) {
+    const response = await fetch('https://<your-null-domain>/api/validate', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ token })
+    });
+    const data = await response.json();
+    return data.success;
+}
+```
+
+#### Python (requests)
+```python
+import requests
+
+def verify_captcha(token):
+    response = requests.post(
+        'https://<your-null-domain>/api/validate',
+        json={'token': token}
+    )
+    result = response.json()
+    return result.get('success', False)
+```
+
+#### Rust (reqwest)
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize)]
+struct ValidatePayload {
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct ValidateResponse {
+    success: bool,
+    score: f32,
+    error: Option<String>,
+}
+
+async fn verify_captcha(token: &str, server_url: &str) -> Result<bool, reqwest::Error> {
+    let client = reqwest::Client::new();
+    let res: ValidateResponse = client
+        .post(format!("{}/api/validate", server_url))
+        .json(&ValidatePayload { token: token.to_string() })
+        .send()
+        .await?
+        .json()
+        .await?;
+    Ok(res.success)
+}
+```
