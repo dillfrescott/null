@@ -544,16 +544,36 @@ async fn verify_handler(
                 }
             } else {
                 // Mouse user aligned the slider. We check if the drag gesture itself is human.
-                if let Some(features) = features::extract_features(&mouse_points) {
-                    let feature_arr = features.to_array();
-                    let drag_score = state.model.predict(&feature_arr);
-                    if drag_score >= 0.25 {
-                        score = drag_score;
-                        is_human = true;
-                        info!("Slider puzzle verification succeeded with drag score: {:.4}", drag_score);
-                    } else {
-                        warn!("Slider puzzle verification failed: drag score {:.4} below human threshold", drag_score);
+                let mut valid_drag_dist = true;
+                let xs: Vec<f32> = mouse_points.iter().map(|p| p.x).collect();
+                if !xs.is_empty() {
+                    let min_x = xs.iter().copied().fold(f32::INFINITY, f32::min);
+                    let max_x = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let span_x = max_x - min_x;
+                    let claimed_drag_dist = (payload.slider_x.unwrap_or(25) - 25).abs() as f32;
+                    
+                    if span_x < claimed_drag_dist - 15.0 {
+                        warn!("Automation detected: horizontal mouse movement span ({:.2}px) is less than claimed drag distance ({:.2}px)", span_x, claimed_drag_dist);
+                        valid_drag_dist = false;
                     }
+                } else {
+                    valid_drag_dist = false;
+                }
+
+                if valid_drag_dist {
+                    if let Some(features) = features::extract_features(&mouse_points) {
+                        let feature_arr = features.to_array();
+                        let drag_score = state.model.predict(&feature_arr);
+                        if drag_score >= 0.25 {
+                            score = drag_score;
+                            is_human = true;
+                            info!("Slider puzzle verification succeeded with drag score: {:.4}", drag_score);
+                        } else {
+                            warn!("Slider puzzle verification failed: drag score {:.4} below human threshold", drag_score);
+                        }
+                    }
+                } else {
+                    bot_flag = true;
                 }
             }
         }
@@ -595,6 +615,18 @@ async fn verify_handler(
 
     // 5. Generate token if verification succeeds, or request fallback if telemetry failed
     if is_human {
+        // Prevent salt reuse to prevent replay attacks getting multiple tokens
+        if !state.cache.check_and_insert(format!("salt:{}", payload.salt), 300) {
+            warn!("Verification failed: Salt has already been consumed (replay).");
+            return Json(VerifyResponse {
+                success: false,
+                score: 0.0,
+                token: None,
+                error: Some("Challenge has already been completed. Re-verification required.".to_string()),
+                fallback_required: None,
+            });
+        }
+
         let token = crypto::generate_token(&state.secret_key, score);
         Json(VerifyResponse {
             success: true,
@@ -637,24 +669,18 @@ async fn validate_handler(
         });
     }
 
-    // Check persistent database
-    let is_used = {
+    // Mark token as used in database atomically to prevent race conditions
+    let mark_success = {
         let conn = state._db_conn.lock().unwrap();
-        db::is_token_used(&conn, &payload.token).unwrap_or(false)
+        db::try_mark_token_used(&conn, &payload.token).unwrap_or(false)
     };
-    if is_used {
+    if !mark_success {
         warn!("Replay validation check: Token has already been used (database).");
         return Json(ValidateResponse {
             success: false,
             score: 0.0,
             error: Some("Token has already been validated.".to_string()),
         });
-    }
-
-    // Mark token as used in database
-    {
-        let conn = state._db_conn.lock().unwrap();
-        let _ = db::mark_token_used(&conn, &payload.token);
     }
 
     // Max age for a token is set to 300 seconds (5 minutes)

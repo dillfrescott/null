@@ -106,11 +106,15 @@ impl MLP {
     /// Train the MLP on a dataset of (input, target) pairs.
     /// target: 1.0 for Human, 0.0 for Bot.
     pub fn train(&mut self, dataset: &[([f32; 8], f32)], epochs: usize, lr: f32) -> f32 {
+        use rand::seq::SliceRandom;
         let mut total_loss = 0.0;
+        let mut rng = rand::thread_rng();
+        let mut shuffled_dataset = dataset.to_vec();
 
         for _epoch in 0..epochs {
+            shuffled_dataset.shuffle(&mut rng);
             total_loss = 0.0;
-            for (x, target) in dataset {
+            for (x, target) in &shuffled_dataset {
                 // 1. Forward pass
                 let (h1_raw, h1_act, h2_raw, h2_act, _out_raw, out_act) = self.forward(x);
 

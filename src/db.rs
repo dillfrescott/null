@@ -159,20 +159,29 @@ pub fn is_token_used(conn: &Connection, token: &str) -> Result<bool, String> {
     Ok(exists)
 }
 
-/// Mark a token as validated
+/// Mark a token as validated atomically. Returns Ok(true) if the token was successfully
+/// marked as used, and Ok(false) if it was already marked as used (due to primary key constraint violation).
 #[allow(dead_code)]
-pub fn mark_token_used(conn: &Connection, token: &str) -> Result<(), String> {
+pub fn try_mark_token_used(conn: &Connection, token: &str) -> Result<bool, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
 
-    conn.execute(
+    match conn.execute(
         "INSERT INTO used_tokens (token, validated_at) VALUES (?1, ?2)",
         params![token, now],
-    ).map_err(|e| format!("Failed to record used token: {}", e))?;
-
-    Ok(())
+    ) {
+        Ok(_) => Ok(true),
+        Err(rusqlite::Error::SqliteFailure(err, _)) => {
+            if err.code == rusqlite::ErrorCode::ConstraintViolation {
+                Ok(false)
+            } else {
+                Err(format!("Failed to record used token: {}", err))
+            }
+        }
+        Err(e) => Err(format!("Failed to record used token: {}", e)),
+    }
 }
 
 /// Clean up expired tokens (older than max_age_secs)
