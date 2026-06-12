@@ -358,35 +358,73 @@
 
             const salt = this.challenge.salt;
             const difficulty = this.challenge.difficulty;
-            const prefix = "0".repeat(difficulty);
+
+            if (!window.crypto || !window.crypto.subtle) {
+                console.error("Null CAPTCHA: Web Crypto API not available.");
+                this.isSolving = false;
+                return;
+            }
+
             let currentNonce = 0;
+            const batchSize = 250;
 
             const solveBatch = async () => {
-                // Run 80 hashes per frame/slice to balance speed and UI thread availability
-                for (let i = 0; i < 80; i++) {
-                    const hash = await this.sha256(salt + currentNonce);
-                    if (hash.startsWith(prefix)) {
-                        this.nonce = currentNonce;
-                        this.isSolved = true;
-                        this.isSolving = false;
-                        return;
+                if (!this.isSolving) return;
+
+                try {
+                    const promises = [];
+                    const nonces = [];
+                    for (let i = 0; i < batchSize; i++) {
+                        const nonce = currentNonce + i;
+                        nonces.push(nonce);
+                        const buf = new TextEncoder().encode(salt + nonce);
+                        promises.push(crypto.subtle.digest("SHA-256", buf));
                     }
-                    currentNonce++;
+
+                    const buffers = await Promise.all(promises);
+                    for (let i = 0; i < batchSize; i++) {
+                        const bytes = new Uint8Array(buffers[i]);
+
+                        let match = true;
+                        const fullBytes = Math.floor(difficulty / 2);
+                        for (let j = 0; j < fullBytes; j++) {
+                            if (bytes[j] !== 0) {
+                                match = false;
+                                break;
+                            }
+                        }
+                        if (match && difficulty % 2 !== 0) {
+                            if (bytes[fullBytes] >= 16) {
+                                match = false;
+                            }
+                        }
+
+                        if (match) {
+                            this.nonce = nonces[i];
+                            this.isSolved = true;
+                            this.isSolving = false;
+                            return;
+                        }
+                    }
+
+                    currentNonce += batchSize;
+                    setTimeout(solveBatch, 0);
+                } catch (err) {
+                    console.error("Null CAPTCHA: PoW solve error", err);
+                    this.isSolving = false;
                 }
-                // Yield to event loop
-                setTimeout(solveBatch, 0);
             };
 
             await solveBatch();
         },
 
         /**
-         * XOR obfuscation using dynamic key from the server
+         * Multi-byte XOR obfuscation using derived key bytes
          */
-        obfuscate(str, key) {
+        obfuscateBytes(str, keyBytes) {
             let result = "";
             for (let i = 0; i < str.length; i++) {
-                result += String.fromCharCode(str.charCodeAt(i) ^ key);
+                result += String.fromCharCode(str.charCodeAt(i) ^ keyBytes[i % keyBytes.length]);
             }
             return btoa(result);
         },
@@ -416,6 +454,7 @@
 
             // Build telemetry and client-side fingerprint payload
             const payloadData = {
+                salt: this.challenge.salt,
                 points: this.points,
                 webdriver: navigator.webdriver || false,
                 plugins: navigator.plugins ? navigator.plugins.length : 0,
@@ -429,7 +468,13 @@
                 timeTaken: Date.now() - this.startTime
             };
 
-            const obfuscatedPayload = this.obfuscate(JSON.stringify(payloadData), this.challenge.encryptionKey);
+            const derivedKeyHex = await this.sha256(this.challenge.salt + this.challenge.encryptionKey);
+            const derivedKeyBytes = [];
+            for (let i = 0; i < derivedKeyHex.length; i += 2) {
+                derivedKeyBytes.push(parseInt(derivedKeyHex.substr(i, 2), 16));
+            }
+
+            const obfuscatedPayload = this.obfuscateBytes(JSON.stringify(payloadData), derivedKeyBytes);
 
             try {
                 const response = await fetch(url, {

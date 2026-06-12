@@ -39,7 +39,7 @@ struct VerifyPayload {
     timestamp: u64,
     difficulty: u32,
     #[serde(rename = "encryptionKey")]
-    encryption_key: u8,
+    encryption_key: String,
     nonce: u64,
 }
 
@@ -48,7 +48,7 @@ struct VerifyPayload {
 struct ChallengeResponse {
     salt: String,
     difficulty: u32,
-    encryption_key: u8,
+    encryption_key: String,
     timestamp: u64,
     signature: String,
 }
@@ -64,6 +64,7 @@ struct ClientScreen {
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DecryptedPayload {
+    salt: String,
     points: Vec<features::TelemetryPoint>,
     webdriver: bool,
     plugins: usize,
@@ -217,8 +218,16 @@ async fn challenge_handler(
         .map(char::from)
         .collect();
 
-    let encryption_key: u8 = rand::thread_rng().gen_range(1..=255);
-    let difficulty: u32 = 4; // requires 4 leading hex zeros (~100-300ms to solve)
+    let encryption_key: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+
+    let difficulty = std::env::var("NULL_CAPTCHA_DIFFICULTY")
+        .unwrap_or_else(|_| "4".to_string())
+        .parse::<u32>()
+        .unwrap_or(4);
 
     let sign_payload = format!("{}.{}.{}.{}", now, salt, difficulty, encryption_key);
     
@@ -288,7 +297,7 @@ async fn verify_handler(
     }
 
     // 4. Decrypt and parse obfuscated payload
-    let decrypted_str = match crypto::decrypt_payload(&payload.payload, payload.encryption_key) {
+    let decrypted_str = match crypto::decrypt_payload(&payload.payload, &payload.salt, &payload.encryption_key) {
         Ok(s) => s,
         Err(e) => {
             warn!("Payload decryption failed: {}", e);
@@ -313,6 +322,37 @@ async fn verify_handler(
             });
         }
     };
+
+    // Verify cryptographic salt binding to prevent cross-challenge replay attacks
+    if client_data.salt != payload.salt {
+        warn!("Verification failed: Telemetry salt mismatch!");
+        return Json(VerifyResponse {
+            success: false,
+            score: 0.0,
+            token: None,
+            error: Some("Telemetry payload is not bound to this challenge.".to_string()),
+        });
+    }
+
+    // Verify telemetry points are unique to prevent replay of the same movements
+    let points_hash = compute_points_hash(&client_data.points);
+    if let Ok(conn) = state.db_conn.lock() {
+        match db::is_telemetry_replayed(&conn, &points_hash) {
+            Ok(true) => {
+                warn!("Verification failed: Replayed telemetry detected!");
+                return Json(VerifyResponse {
+                    success: false,
+                    score: 0.0,
+                    token: None,
+                    error: Some("Automated behavior detected (replayed telemetry).".to_string()),
+                });
+            }
+            Err(e) => {
+                warn!("Database check for telemetry replay failed: {}", e);
+            }
+            _ => {}
+        }
+    }
 
     // 2. Extract features from telemetry points
     let features_opt = features::extract_features(&client_data.points);
@@ -394,6 +434,7 @@ async fn verify_handler(
             user_agent,
             Some(&ip_address),
             &features_json,
+            &points_hash,
         ) {
             warn!("Failed to log telemetry into SQLite database: {}", e);
         }
@@ -480,4 +521,14 @@ async fn validate_handler(
             })
         }
     }
+}
+
+fn compute_points_hash(points: &[features::TelemetryPoint]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for p in points {
+        hasher.update(format!("{},{},{}", p.x, p.y, p.t).as_bytes());
+    }
+    let hash_bytes = hasher.finalize();
+    format!("{:x}", hash_bytes)
 }

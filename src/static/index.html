@@ -420,21 +420,61 @@
 
             const salt = challenge.salt;
             const difficulty = challenge.difficulty;
-            const prefix = "0".repeat(difficulty);
+
+            if (!window.crypto || !window.crypto.subtle) {
+                console.error("Null CAPTCHA: Web Crypto API not available.");
+                isSolving = false;
+                return;
+            }
+
             let currentNonce = 0;
+            const batchSize = 250;
 
             const solveBatch = async () => {
-                for (let i = 0; i < 80; i++) {
-                    const hash = await sha256(salt + currentNonce);
-                    if (hash.startsWith(prefix)) {
-                        solvedNonce = currentNonce;
-                        isSolved = true;
-                        isSolving = false;
-                        return;
+                if (!isSolving) return;
+
+                try {
+                    const promises = [];
+                    const nonces = [];
+                    for (let i = 0; i < batchSize; i++) {
+                        const nonce = currentNonce + i;
+                        nonces.push(nonce);
+                        const buf = new TextEncoder().encode(salt + nonce);
+                        promises.push(crypto.subtle.digest("SHA-256", buf));
                     }
-                    currentNonce++;
+
+                    const buffers = await Promise.all(promises);
+                    for (let i = 0; i < batchSize; i++) {
+                        const bytes = new Uint8Array(buffers[i]);
+
+                        let match = true;
+                        const fullBytes = Math.floor(difficulty / 2);
+                        for (let j = 0; j < fullBytes; j++) {
+                            if (bytes[j] !== 0) {
+                                match = false;
+                                break;
+                            }
+                        }
+                        if (match && difficulty % 2 !== 0) {
+                            if (bytes[fullBytes] >= 16) {
+                                match = false;
+                            }
+                        }
+
+                        if (match) {
+                            solvedNonce = nonces[i];
+                            isSolved = true;
+                            isSolving = false;
+                            return;
+                        }
+                    }
+
+                    currentNonce += batchSize;
+                    setTimeout(solveBatch, 0);
+                } catch (err) {
+                    console.error("Null CAPTCHA: PoW solve error", err);
+                    isSolving = false;
                 }
-                setTimeout(solveBatch, 0);
             };
 
             await solveBatch();
@@ -443,10 +483,10 @@
         // Start background solving immediately
         fetchChallenge();
 
-        function obfuscate(str, key) {
+        function obfuscateBytes(str, keyBytes) {
             let result = "";
             for (let i = 0; i < str.length; i++) {
-                result += String.fromCharCode(str.charCodeAt(i) ^ key);
+                result += String.fromCharCode(str.charCodeAt(i) ^ keyBytes[i % keyBytes.length]);
             }
             return btoa(result);
         }
@@ -497,6 +537,7 @@
 
             // Build payload with telemetry and fingerprint data
             const payloadData = {
+                salt: challenge.salt,
                 points: points,
                 webdriver: navigator.webdriver || false,
                 plugins: navigator.plugins ? navigator.plugins.length : 0,
@@ -510,7 +551,13 @@
                 timeTaken: Date.now() - startTime
             };
 
-            const obfuscatedPayload = obfuscate(JSON.stringify(payloadData), challenge.encryptionKey);
+            const derivedKeyHex = await sha256(challenge.salt + challenge.encryptionKey);
+            const derivedKeyBytes = [];
+            for (let i = 0; i < derivedKeyHex.length; i += 2) {
+                derivedKeyBytes.push(parseInt(derivedKeyHex.substr(i, 2), 16));
+            }
+
+            const obfuscatedPayload = obfuscateBytes(JSON.stringify(payloadData), derivedKeyBytes);
 
             try {
                 const serverUrl = window.location.origin;

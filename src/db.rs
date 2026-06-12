@@ -26,8 +26,21 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
             webdriver INTEGER NOT NULL,
             user_agent TEXT,
             ip_address TEXT,
-            features_json TEXT NOT NULL
+            features_json TEXT NOT NULL,
+            points_hash TEXT NOT NULL DEFAULT ''
         )",
+        [],
+    )?;
+
+    // Try to alter table to add the column if it doesn't exist (ignoring errors if it already exists)
+    let _ = conn.execute(
+        "ALTER TABLE telemetry_logs ADD COLUMN points_hash TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+
+    // Create index for fast points_hash lookups
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_telemetry_points_hash ON telemetry_logs (points_hash)",
         [],
     )?;
 
@@ -54,7 +67,7 @@ pub fn save_model(conn: &Connection, model: &MLP) -> Result<(), String> {
         .as_secs() as i64;
 
     conn.execute(
-        "INSERT OR REPLACE INTO model_weights (key, value, updated_at) VALUES ('current_model', ?1, ?2)",
+        "INSERT OR REPLACE INTO model_weights (key, value, updated_at) VALUES ('current_model_v2', ?1, ?2)",
         params![serialized, now],
     ).map_err(|e| format!("Database save error: {}", e))?;
 
@@ -64,7 +77,7 @@ pub fn save_model(conn: &Connection, model: &MLP) -> Result<(), String> {
 /// Load model weights from the database, if they exist
 pub fn load_model(conn: &Connection) -> Result<Option<MLP>, String> {
     let mut stmt = conn
-        .prepare("SELECT value FROM model_weights WHERE key = 'current_model'")
+        .prepare("SELECT value FROM model_weights WHERE key = 'current_model_v2'")
         .map_err(|e| format!("Prepare statement failed: {}", e))?;
 
     let mut rows = stmt
@@ -91,6 +104,7 @@ pub fn log_telemetry(
     user_agent: Option<&str>,
     ip_address: Option<&str>,
     features_json: &str,
+    points_hash: &str,
 ) -> Result<(), String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -98,8 +112,8 @@ pub fn log_telemetry(
         .as_secs() as i64;
 
     conn.execute(
-        "INSERT INTO telemetry_logs (timestamp, point_count, score, is_human, webdriver, user_agent, ip_address, features_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO telemetry_logs (timestamp, point_count, score, is_human, webdriver, user_agent, ip_address, features_json, points_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             now,
             point_count as i64,
@@ -108,11 +122,27 @@ pub fn log_telemetry(
             if webdriver { 1 } else { 0 },
             user_agent,
             ip_address,
-            features_json
+            features_json,
+            points_hash
         ],
     ).map_err(|e| format!("Failed to insert telemetry log: {}", e))?;
 
     Ok(())
+}
+
+/// Check if telemetry points have already been used to prevent replay attacks
+pub fn is_telemetry_replayed(conn: &Connection, points_hash: &str) -> Result<bool, String> {
+    if points_hash.is_empty() {
+        return Ok(false);
+    }
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM telemetry_logs WHERE points_hash = ?1 LIMIT 1")
+        .map_err(|e| format!("Prepare query failed: {}", e))?;
+    
+    let exists = stmt.exists(params![points_hash])
+        .map_err(|e| format!("Query points_hash failed: {}", e))?;
+
+    Ok(exists)
 }
 
 /// Check if a token has already been validated (to prevent reuse)

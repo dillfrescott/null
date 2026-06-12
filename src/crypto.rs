@@ -6,12 +6,21 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, engine::general_purpose::
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub fn decrypt_payload(obfuscated_b64: &str, key: u8) -> Result<String, String> {
+pub fn decrypt_payload(obfuscated_b64: &str, salt: &str, key: &str) -> Result<String, String> {
     let decoded_bytes = STANDARD
         .decode(obfuscated_b64.trim().as_bytes())
         .map_err(|e| format!("Base64 decode error: {}", e))?;
     
-    let decrypted_bytes: Vec<u8> = decoded_bytes.into_iter().map(|b| b ^ key).collect();
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{}{}", salt, key).as_bytes());
+    let derived_key = hasher.finalize();
+    
+    let decrypted_bytes: Vec<u8> = decoded_bytes
+        .into_iter()
+        .enumerate()
+        .map(|(i, b)| b ^ derived_key[i % 32])
+        .collect();
     
     String::from_utf8(decrypted_bytes)
         .map_err(|e| format!("UTF8 decode error: {}", e))
@@ -86,4 +95,43 @@ pub fn verify_token(secret: &[u8], token: &str, max_age_secs: u64) -> Result<f32
         .map_err(|e| format!("Invalid score: {}", e))?;
 
     Ok(score)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_obfuscation_roundtrip() {
+        let original = "{\"points\":[{\"x\":1.0,\"y\":2.0,\"t\":3.0}],\"webdriver\":false}";
+        let salt = "random_salt_12345";
+        let key = "some_random_key_67890";
+        
+        // Emulate client-side derivation and XOR
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{}{}", salt, key).as_bytes());
+        let derived_key = hasher.finalize();
+        
+        let obfuscated_bytes: Vec<u8> = original.as_bytes()
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ derived_key[i % 32])
+            .collect();
+        
+        let obfuscated_b64 = base64::engine::general_purpose::STANDARD.encode(obfuscated_bytes);
+        
+        let decrypted = decrypt_payload(&obfuscated_b64, salt, key).unwrap();
+        assert_eq!(decrypted, original);
+    }
+
+    #[test]
+    fn test_token_roundtrip() {
+        let secret = b"my_secret_key_which_is_very_long";
+        let score = 0.85;
+        let token = generate_token(secret, score);
+        
+        let verified_score = verify_token(secret, &token, 10).unwrap();
+        assert!((verified_score - score).abs() < 1e-4);
+    }
 }

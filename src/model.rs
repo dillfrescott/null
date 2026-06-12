@@ -173,9 +173,9 @@ impl MLP {
         let mut rng = rand::thread_rng();
         let mut dataset = Vec::new();
 
-        // 1. Generate Bot Features (target = 0.0)
+        // 1. Generate Bot Features - Group A: Linear bots (target = 0.0)
         // Bots: straight lines, constant speeds, no jitter, no entropy.
-        for _ in 0..1000 {
+        for _ in 0..500 {
             let straightness = rng.gen_range(0.98..1.0);
             let avg_speed = rng.gen_range(0.3..0.9);
             let speed_var = rng.gen_range(0.0..0.02); // very low variance
@@ -197,7 +197,31 @@ impl MLP {
             ], 0.0));
         }
 
-        // 2. Generate Human Features (target = 1.0)
+        // 2. Generate Bot Features - Group B: Bezier / Curve bots (target = 0.0)
+        // These bots use curved trajectories but lack human angular jitter and entropy.
+        for _ in 0..500 {
+            let straightness = rng.gen_range(0.7..0.95);
+            let avg_speed = rng.gen_range(0.2..0.7);
+            let speed_var = rng.gen_range(0.02..0.35); // some speed changes
+            let angular_jitter = rng.gen_range(0.0..0.03); // extremely smooth path
+            let total_duration = rng.gen_range(0.1..0.5);
+            let line_deviation = rng.gen_range(0.02..0.15); // curved path
+            let point_count = rng.gen_range(0.15..0.6);
+            let entropy = rng.gen_range(0.0..0.08); // very low direction entropy
+
+            dataset.push(([
+                straightness,
+                avg_speed,
+                speed_var,
+                angular_jitter,
+                total_duration,
+                line_deviation,
+                point_count,
+                entropy,
+            ], 0.0));
+        }
+
+        // 3. Generate Human Features (target = 1.0)
         // Humans: curves, speed variations, pause adjustments, jitter, entropy.
         for _ in 0..1000 {
             let straightness = rng.gen_range(0.5..0.92); // curved path
