@@ -1,0 +1,18 @@
+[package]
+name = "null-captcha"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.7.5"
+tokio = { version = "1.38", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tower-http = { version = "0.5.2", features = ["fs", "cors", "trace"] }
+rand = "0.8.5"
+hmac = "0.12.1"
+sha2 = "0.10.8"
+base64 = "0.22.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+rusqlite = { version = "0.31.0", features = ["bundled"] }
