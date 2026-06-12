@@ -16,11 +16,18 @@ pub fn decrypt_payload(obfuscated_b64: &str, salt: &str, key: &str) -> Result<St
     hasher.update(format!("{}{}", salt, key).as_bytes());
     let derived_key = hasher.finalize();
     
-    let decrypted_bytes: Vec<u8> = decoded_bytes
-        .into_iter()
-        .enumerate()
-        .map(|(i, b)| b ^ derived_key[i % 32])
-        .collect();
+    let mut decrypted_bytes = Vec::with_capacity(decoded_bytes.len());
+    
+    for (block_idx, chunk) in decoded_bytes.chunks(32).enumerate() {
+        let mut block_hasher = Sha256::new();
+        block_hasher.update(&derived_key);
+        block_hasher.update(&(block_idx as u32).to_be_bytes());
+        let block_key = block_hasher.finalize();
+        
+        for (i, &b) in chunk.iter().enumerate() {
+            decrypted_bytes.push(b ^ block_key[i]);
+        }
+    }
     
     String::from_utf8(decrypted_bytes)
         .map_err(|e| format!("UTF8 decode error: {}", e))
@@ -107,17 +114,24 @@ mod tests {
         let salt = "random_salt_12345";
         let key = "some_random_key_67890";
         
-        // Emulate client-side derivation and XOR
+        // Emulate CTR mode encryption
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(format!("{}{}", salt, key).as_bytes());
         let derived_key = hasher.finalize();
         
-        let obfuscated_bytes: Vec<u8> = original.as_bytes()
-            .iter()
-            .enumerate()
-            .map(|(i, b)| b ^ derived_key[i % 32])
-            .collect();
+        let mut obfuscated_bytes = Vec::with_capacity(original.len());
+        
+        for (block_idx, chunk) in original.as_bytes().chunks(32).enumerate() {
+            let mut block_hasher = Sha256::new();
+            block_hasher.update(&derived_key);
+            block_hasher.update(&(block_idx as u32).to_be_bytes());
+            let block_key = block_hasher.finalize();
+            
+            for (i, &b) in chunk.iter().enumerate() {
+                obfuscated_bytes.push(b ^ block_key[i]);
+            }
+        }
         
         let obfuscated_b64 = base64::engine::general_purpose::STANDARD.encode(obfuscated_bytes);
         

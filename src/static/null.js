@@ -212,7 +212,7 @@
                 document.head.appendChild(style);
             }
 
-            const isAuto = this.points.length >= 5;
+            const isAuto = NullCaptcha.points.length >= 5;
             const initialClass = isAuto ? "captcha-widget loading" : "captcha-widget";
             const initialText = isAuto ? "Analyzing behavior..." : "I'm not a robot";
 
@@ -245,7 +245,7 @@
             const runVerification = async (isAutoVerify) => {
                 if (captchaWidget.classList.contains('verified') || isVerifying) return;
 
-                if (isAutoVerify === true && this.points.length < 5) {
+                if (isAutoVerify === true && NullCaptcha.points.length < 5) {
                     return;
                 }
 
@@ -254,7 +254,7 @@
                 textLabel.textContent = "Analyzing behavior...";
 
                 try {
-                    const result = await this.verify();
+                    const result = await NullCaptcha.verify();
 
                     if (result.success && result.token) {
                         captchaWidget.className = "captcha-widget verified";
@@ -262,6 +262,11 @@
                         if (options.onSuccess) {
                             setTimeout(() => options.onSuccess(result.token), 500);
                         }
+                    } else if (result.fallbackRequired) {
+                        isVerifying = false;
+                        captchaWidget.className = "captcha-widget"; // neutral state during fallback puzzle
+                        textLabel.textContent = "Confirm you are human...";
+                        NullCaptcha.showSliderFallback(containerEl, result, options);
                     } else {
                         isVerifying = false;
                         captchaWidget.className = "captcha-widget failed";
@@ -291,27 +296,27 @@
          * Start tracking mouse/touch movements to generate telemetry
          */
         startTracking() {
-            if (this.isTracking) return;
-            this.isTracking = true;
-            this.points = [];
-            this.startTime = Date.now();
+            if (NullCaptcha.isTracking) return;
+            NullCaptcha.isTracking = true;
+            NullCaptcha.points = [];
+            NullCaptcha.startTime = Date.now();
 
             const recordMovement = (clientX, clientY) => {
-                if (!this.isTracking) return;
+                if (!NullCaptcha.isTracking) return;
                 
                 const now = Date.now();
-                if (now - this.lastSampleTime < this.sampleIntervalMs) return;
+                if (now - NullCaptcha.lastSampleTime < NullCaptcha.sampleIntervalMs) return;
 
-                if (this.points.length >= this.maxPoints) {
-                    this.points.splice(Math.floor(this.maxPoints / 2), 1);
+                if (NullCaptcha.points.length >= NullCaptcha.maxPoints) {
+                    NullCaptcha.points.splice(Math.floor(NullCaptcha.maxPoints / 2), 1);
                 }
 
-                this.points.push({
+                NullCaptcha.points.push({
                     x: clientX,
                     y: clientY,
-                    t: now - this.startTime
+                    t: now - NullCaptcha.startTime
                 });
-                this.lastSampleTime = now;
+                NullCaptcha.lastSampleTime = now;
             };
 
             window.addEventListener("mousemove", (e) => recordMovement(e.clientX, e.clientY), { passive: true });
@@ -419,20 +424,262 @@
         },
 
         /**
-         * Multi-byte XOR obfuscation using derived key bytes
+         * Cryptographically secure SHA256-CTR mode stream cipher
          */
-        obfuscateBytes(str, keyBytes) {
-            let result = "";
-            for (let i = 0; i < str.length; i++) {
-                result += String.fromCharCode(str.charCodeAt(i) ^ keyBytes[i % keyBytes.length]);
+        async encryptPayload(str, derivedKeyHex) {
+            const encoder = new TextEncoder();
+            const msgBytes = encoder.encode(str);
+            const derivedKeyBytes = [];
+            for (let i = 0; i < derivedKeyHex.length; i += 2) {
+                derivedKeyBytes.push(parseInt(derivedKeyHex.substr(i, 2), 16));
             }
-            return btoa(result);
+            
+            const encryptedBytes = new Uint8Array(msgBytes.length);
+            
+            for (let blockIdx = 0; blockIdx < Math.ceil(msgBytes.length / 32); blockIdx++) {
+                const hashBuf = new Uint8Array(32 + 4);
+                hashBuf.set(derivedKeyBytes, 0);
+                
+                hashBuf[32] = (blockIdx >> 24) & 0xff;
+                hashBuf[33] = (blockIdx >> 16) & 0xff;
+                hashBuf[34] = (blockIdx >> 8) & 0xff;
+                hashBuf[35] = blockIdx & 0xff;
+                
+                const blockKeyBuffer = await crypto.subtle.digest("SHA-256", hashBuf);
+                const blockKeyBytes = new Uint8Array(blockKeyBuffer);
+                
+                const start = blockIdx * 32;
+                const end = Math.min(start + 32, msgBytes.length);
+                for (let i = start; i < end; i++) {
+                    encryptedBytes[i] = msgBytes[i] ^ blockKeyBytes[i - start];
+                }
+            }
+            
+            let binary = "";
+            const len = encryptedBytes.byteLength;
+            for (let i = 0; i < len; i++) {
+                binary += String.fromCharCode(encryptedBytes[i]);
+            }
+            return btoa(binary);
+        },
+
+        /**
+         * Display the slider challenge fallback when passive verification fails
+         */
+        showSliderFallback(containerEl, verifyResult, options) {
+            // Prevent multiple panels from rendering
+            if (containerEl.querySelector('#null-slider-panel')) return;
+
+            const sliderPanel = document.createElement('div');
+            sliderPanel.id = 'null-slider-panel';
+            sliderPanel.style.marginTop = '12px';
+            sliderPanel.style.borderTop = '1px solid rgba(255,255,255,0.09)';
+            sliderPanel.style.paddingTop = '15px';
+            sliderPanel.style.display = 'flex';
+            sliderPanel.style.flexDirection = 'column';
+            sliderPanel.style.alignItems = 'center';
+            sliderPanel.style.gap = '12px';
+            sliderPanel.style.width = '100%';
+
+            sliderPanel.innerHTML = `
+                <div style="position: relative; width: 300px; height: 80px; background: #111; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05); overflow: hidden;">
+                    <canvas id="null-slider-canvas" width="300" height="80" style="display: block; width: 100%; height: 100%;"></canvas>
+                </div>
+                <div class="null-slider-track-container" style="position: relative; width: 300px; height: 16px; background: #161616; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px;">
+                    <div id="null-slider-thumb" tabindex="0" aria-label="Slider handle" style="position: absolute; top: -5px; left: 0; width: 26px; height: 26px; background: #ffffff; border-radius: 50%; cursor: grab; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 5px rgba(0,0,0,0.5); outline: none; border: 1px solid #ffffff; transition: background 0.1s ease;">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="width: 12px; height: 12px;"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                    </div>
+                </div>
+                <span style="font-size: 0.75rem; color: #888; user-select: none;">Drag the slider to fit the puzzle piece</span>
+            `;
+
+            containerEl.appendChild(sliderPanel);
+
+            const widget = containerEl.querySelector('#null-captcha-widget');
+            const textLabel = containerEl.querySelector('#null-captcha-text-label');
+            const thumb = containerEl.querySelector('#null-slider-thumb');
+            const canvas = containerEl.querySelector('#null-slider-canvas');
+            const ctx = canvas.getContext('2d');
+            
+            const targetX = this.challenge.sliderTarget;
+            const startX = 25;
+            let currentX = startX;
+            let isDragging = false;
+            let dragStartMouseX = 0;
+            let accessibilityMode = false;
+
+            const shapes = ['circle', 'square', 'triangle', 'diamond', 'star'];
+            const selectedShape = shapes[Math.floor(Math.random() * shapes.length)];
+
+            const drawPiece = (x) => {
+                ctx.fillStyle = '#111';
+                ctx.fillRect(0, 0, 300, 80);
+                
+                // Draw background grid lines
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
+                ctx.lineWidth = 1;
+                for (let i = 0; i < 300; i += 20) {
+                    ctx.beginPath();
+                    ctx.moveTo(i, 0);
+                    ctx.lineTo(i, 80);
+                    ctx.stroke();
+                }
+                for (let j = 0; j < 80; j += 20) {
+                    ctx.beginPath();
+                    ctx.moveTo(0, j);
+                    ctx.lineTo(300, j);
+                    ctx.stroke();
+                }
+                
+                const drawShapePath = (shapeX, shapeY) => {
+                    ctx.beginPath();
+                    if (selectedShape === 'circle') {
+                        ctx.arc(shapeX, shapeY, 16, 0, Math.PI * 2);
+                    } else if (selectedShape === 'square') {
+                        ctx.rect(shapeX - 16, shapeY - 16, 32, 32);
+                    } else if (selectedShape === 'triangle') {
+                        ctx.moveTo(shapeX, shapeY - 18);
+                        ctx.lineTo(shapeX - 18, shapeY + 16);
+                        ctx.lineTo(shapeX + 18, shapeY + 16);
+                        ctx.closePath();
+                    } else if (selectedShape === 'diamond') {
+                        ctx.moveTo(shapeX, shapeY - 18);
+                        ctx.lineTo(shapeX + 18, shapeY);
+                        ctx.lineTo(shapeX, shapeY + 18);
+                        ctx.lineTo(shapeX - 18, shapeY);
+                        ctx.closePath();
+                    } else if (selectedShape === 'star') {
+                        const spikes = 5;
+                        const outerRadius = 18;
+                        const innerRadius = 8;
+                        let rot = Math.PI / 2 * 3;
+                        let step = Math.PI / spikes;
+                        ctx.moveTo(shapeX, shapeY - outerRadius);
+                        for (let i = 0; i < spikes; i++) {
+                            let sx = shapeX + Math.cos(rot) * outerRadius;
+                            let sy = shapeY + Math.sin(rot) * outerRadius;
+                            ctx.lineTo(sx, sy);
+                            rot += step;
+                            sx = shapeX + Math.cos(rot) * innerRadius;
+                            sy = shapeY + Math.sin(rot) * innerRadius;
+                            ctx.lineTo(sx, sy);
+                            rot += step;
+                        }
+                        ctx.closePath();
+                    }
+                };
+
+                // Draw grey target piece slot
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+                drawShapePath(targetX, 40);
+                ctx.fill();
+                ctx.stroke();
+                
+                // Draw moving piece (white)
+                ctx.fillStyle = '#ffffff';
+                ctx.strokeStyle = '#ffffff';
+                ctx.shadowColor = 'rgba(255,255,255,0.4)';
+                ctx.shadowBlur = 8;
+                drawShapePath(x, 40);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            };
+
+            const updateSliderPosition = (x) => {
+                currentX = Math.max(20, Math.min(280, x));
+                const thumbLeft = ((currentX - 20) / 260) * (300 - 26);
+                thumb.style.left = `${thumbLeft}px`;
+                drawPiece(currentX);
+            };
+
+            // Render initial state
+            drawPiece(currentX);
+
+            // Submit solution to server
+            const submitSliderSolution = async () => {
+                widget.className = "captcha-widget loading";
+                textLabel.textContent = "Analyzing slider alignment...";
+                
+                try {
+                    const result = await NullCaptcha.verify({
+                        sliderX: Math.round(currentX),
+                        sliderTarget: targetX,
+                        accessibilityMode: accessibilityMode
+                    });
+
+                    if (result.success && result.token) {
+                        widget.className = "captcha-widget verified";
+                        textLabel.textContent = "Verification Complete";
+                        sliderPanel.remove();
+                        if (options.onSuccess) {
+                            setTimeout(() => options.onSuccess(result.token), 500);
+                        }
+                    } else {
+                        widget.className = "captcha-widget failed";
+                        textLabel.textContent = "Verification Failed";
+                        alert(result.error || "Alignment verification failed. Try again.");
+                        updateSliderPosition(startX);
+                        NullCaptcha.points = []; // reset points to collect new gesture telemetry
+                    }
+                } catch (err) {
+                    console.error("Slider verification error:", err);
+                    widget.className = "captcha-widget failed";
+                    textLabel.textContent = "Error";
+                }
+            };
+
+            // Keyboard controls for accessibility
+            thumb.addEventListener('keydown', (e) => {
+                if (e.key === 'ArrowRight') {
+                    accessibilityMode = true;
+                    updateSliderPosition(currentX + 5);
+                } else if (e.key === 'ArrowLeft') {
+                    accessibilityMode = true;
+                    updateSliderPosition(currentX - 5);
+                } else if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    submitSliderSolution();
+                }
+            });
+
+            // Pointer event dragging
+            const startDrag = (clientX) => {
+                isDragging = true;
+                dragStartMouseX = clientX - currentX;
+                thumb.style.cursor = 'grabbing';
+            };
+
+            const doDrag = (clientX) => {
+                if (!isDragging) return;
+                const newX = clientX - dragStartMouseX;
+                updateSliderPosition(newX);
+            };
+
+            const stopDrag = () => {
+                if (!isDragging) return;
+                isDragging = false;
+                thumb.style.cursor = 'grab';
+                submitSliderSolution();
+            };
+
+            thumb.addEventListener('mousedown', (e) => startDrag(e.clientX));
+            window.addEventListener('mousemove', (e) => doDrag(e.clientX));
+            window.addEventListener('mouseup', stopDrag);
+
+            thumb.addEventListener('touchstart', (e) => {
+                if (e.touches.length > 0) startDrag(e.touches[0].clientX);
+            }, { passive: true });
+            window.addEventListener('touchmove', (e) => {
+                if (e.touches.length > 0) doDrag(e.touches[0].clientX);
+            }, { passive: true });
+            window.addEventListener('touchend', stopDrag);
         },
 
         /**
          * Submit telemetry to the Null CAPTCHA server and get a validation token
          */
-        async verify() {
+        async verify(sliderParams = {}) {
             // Wait for background PoW to finish if the user clicked too fast
             while (this.isSolving && !this.isSolved) {
                 await new Promise(r => setTimeout(r, 50));
@@ -465,16 +712,12 @@
                     ow: window.outerWidth || 0,
                     oh: window.outerHeight || 0
                 },
-                timeTaken: Date.now() - this.startTime
+                timeTaken: Date.now() - this.startTime,
+                accessibilityMode: sliderParams.accessibilityMode || false
             };
 
             const derivedKeyHex = await this.sha256(this.challenge.salt + this.challenge.encryptionKey);
-            const derivedKeyBytes = [];
-            for (let i = 0; i < derivedKeyHex.length; i += 2) {
-                derivedKeyBytes.push(parseInt(derivedKeyHex.substr(i, 2), 16));
-            }
-
-            const obfuscatedPayload = this.obfuscateBytes(JSON.stringify(payloadData), derivedKeyBytes);
+            const obfuscatedPayload = await this.encryptPayload(JSON.stringify(payloadData), derivedKeyHex);
 
             try {
                 const response = await fetch(url, {
@@ -489,7 +732,9 @@
                         timestamp: this.challenge.timestamp,
                         difficulty: this.challenge.difficulty,
                         encryptionKey: this.challenge.encryptionKey,
-                        nonce: this.nonce
+                        nonce: this.nonce,
+                        sliderX: (sliderParams.sliderX !== undefined && sliderParams.sliderX !== null) ? sliderParams.sliderX : null,
+                        sliderTarget: (sliderParams.sliderTarget !== undefined && sliderParams.sliderTarget !== null) ? sliderParams.sliderTarget : (this.challenge ? this.challenge.sliderTarget : null)
                     })
                 });
 
@@ -531,7 +776,7 @@
                     submitBtn.innerHTML = "Verifying...";
                 }
 
-                const res = await this.verify();
+                const res = await NullCaptcha.verify();
 
                 if (res.success && res.token) {
                     const tokenInput = document.createElement("input");

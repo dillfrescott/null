@@ -18,17 +18,31 @@ mod crypto;
 mod features;
 mod model;
 mod db;
+mod cache;
 
 // Embed frontend assets directly into the binary
 const INDEX_HTML: &str = include_str!("static/index.html");
 const NULL_JS: &str = include_str!("static/null.js");
 
+struct LogMessage {
+    point_count: usize,
+    score: f32,
+    is_human: bool,
+    webdriver: bool,
+    user_agent: Option<String>,
+    ip_address: Option<String>,
+    features_json: String,
+    points_hash: String,
+}
+
 /// Application state containing neural network, database connection, and security configurations
 struct AppState {
     model: model::MLP,
-    db_conn: std::sync::Mutex<rusqlite::Connection>,
+    _db_conn: std::sync::Mutex<rusqlite::Connection>,
     secret_key: Vec<u8>,
     min_score: f32,
+    cache: cache::MemoryCache,
+    log_tx: tokio::sync::mpsc::Sender<LogMessage>,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +55,10 @@ struct VerifyPayload {
     #[serde(rename = "encryptionKey")]
     encryption_key: String,
     nonce: u64,
+    #[serde(default, rename = "sliderX")]
+    slider_x: Option<i32>,
+    #[serde(default, rename = "sliderTarget")]
+    slider_target: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -51,6 +69,7 @@ struct ChallengeResponse {
     encryption_key: String,
     timestamp: u64,
     signature: String,
+    slider_target: i32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -71,14 +90,19 @@ struct DecryptedPayload {
     languages: usize,
     screen: ClientScreen,
     time_taken: u64,
+    #[serde(default)]
+    accessibility_mode: bool,
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct VerifyResponse {
     success: bool,
     score: f32,
     token: Option<String>,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback_required: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -150,11 +174,37 @@ async fn main() {
         .parse::<f32>()
         .unwrap_or(0.5);
 
+    // Initialize Memory Cache for token and telemetry replay checks
+    let cache = cache::MemoryCache::new();
+
+    // Setup asynchronous background telemetry logger to prevent SQLite write lock blocks
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::channel::<LogMessage>(5000);
+    let db_path_clone = db_path.clone();
+    tokio::spawn(async move {
+        if let Ok(conn) = rusqlite::Connection::open(&db_path_clone) {
+            while let Some(msg) = log_rx.recv().await {
+                let _ = db::log_telemetry(
+                    &conn,
+                    msg.point_count,
+                    msg.score,
+                    msg.is_human,
+                    msg.webdriver,
+                    msg.user_agent.as_deref(),
+                    msg.ip_address.as_deref(),
+                    &msg.features_json,
+                    &msg.points_hash,
+                );
+            }
+        }
+    });
+
     let state = Arc::new(AppState {
         model,
-        db_conn: std::sync::Mutex::new(db_conn),
+        _db_conn: std::sync::Mutex::new(db_conn),
         secret_key,
         min_score,
+        cache,
+        log_tx,
     });
 
     // 4. Setup router with CORS
@@ -229,7 +279,10 @@ async fn challenge_handler(
         .parse::<u32>()
         .unwrap_or(4);
 
-    let sign_payload = format!("{}.{}.{}.{}", now, salt, difficulty, encryption_key);
+    // Generate random slider target position for interactive fallback UI
+    let slider_target = rand::thread_rng().gen_range(50..250);
+
+    let sign_payload = format!("{}.{}.{}.{}.{}", now, salt, difficulty, encryption_key, slider_target);
     
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&state.secret_key)
         .expect("HMAC sign failed");
@@ -242,6 +295,7 @@ async fn challenge_handler(
         encryption_key,
         timestamp: now,
         signature,
+        slider_target,
     })
 }
 
@@ -253,7 +307,10 @@ async fn verify_handler(
     Json(payload): Json<VerifyPayload>,
 ) -> impl IntoResponse {
     // 1. Verify Challenge Signature
-    let expected_payload = format!("{}.{}.{}.{}", payload.timestamp, payload.salt, payload.difficulty, payload.encryption_key);
+    let expected_payload = match payload.slider_target {
+        Some(target) => format!("{}.{}.{}.{}.{}", payload.timestamp, payload.salt, payload.difficulty, payload.encryption_key, target),
+        None => format!("{}.{}.{}.{}", payload.timestamp, payload.salt, payload.difficulty, payload.encryption_key),
+    };
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&state.secret_key)
         .expect("HMAC verification signature setup failed");
     mac.update(expected_payload.as_bytes());
@@ -266,6 +323,7 @@ async fn verify_handler(
             score: 0.0,
             token: None,
             error: Some("Invalid challenge signature. Re-verification required.".to_string()),
+            fallback_required: None,
         });
     }
 
@@ -282,6 +340,7 @@ async fn verify_handler(
             score: 0.0,
             token: None,
             error: Some("Verification challenge expired. Please retry.".to_string()),
+            fallback_required: None,
         });
     }
 
@@ -293,6 +352,7 @@ async fn verify_handler(
             score: 0.0,
             token: None,
             error: Some("Invalid Proof of Work solution.".to_string()),
+            fallback_required: None,
         });
     }
 
@@ -306,6 +366,7 @@ async fn verify_handler(
                 score: 0.0,
                 token: None,
                 error: Some("Payload validation failed. Ensure JS client is up to date.".to_string()),
+                fallback_required: None,
             });
         }
     };
@@ -319,6 +380,7 @@ async fn verify_handler(
                 score: 0.0,
                 token: None,
                 error: Some("Telemetry structure mismatch.".to_string()),
+                fallback_required: None,
             });
         }
     };
@@ -331,86 +393,103 @@ async fn verify_handler(
             score: 0.0,
             token: None,
             error: Some("Telemetry payload is not bound to this challenge.".to_string()),
+            fallback_required: None,
         });
     }
 
     // Verify telemetry points are unique to prevent replay of the same movements
     let points_hash = compute_points_hash(&client_data.points);
-    if let Ok(conn) = state.db_conn.lock() {
-        match db::is_telemetry_replayed(&conn, &points_hash) {
-            Ok(true) => {
-                warn!("Verification failed: Replayed telemetry detected!");
-                return Json(VerifyResponse {
-                    success: false,
-                    score: 0.0,
-                    token: None,
-                    error: Some("Automated behavior detected (replayed telemetry).".to_string()),
-                });
-            }
-            Err(e) => {
-                warn!("Database check for telemetry replay failed: {}", e);
-            }
-            _ => {}
-        }
-    }
-
-    // 2. Extract features from telemetry points
-    let features_opt = features::extract_features(&client_data.points);
-    
-    let features = match features_opt {
-        Some(f) => f,
-        None => {
+    if client_data.points.len() >= 5 {
+        if !state.cache.check_and_insert(format!("telemetry:{}", points_hash), 300) {
+            warn!("Verification failed: Replayed telemetry detected!");
             return Json(VerifyResponse {
                 success: false,
                 score: 0.0,
                 token: None,
-                error: Some("Insufficient interaction telemetry. Please move your cursor naturally.".to_string()),
+                error: Some("Automated behavior detected (replayed telemetry).".to_string()),
+                fallback_required: None,
             });
         }
-    };
+    }
 
-    // 3. Perform MLP Neural Network inference
-    let feature_arr = features.to_array();
-    let mut score = state.model.predict(&feature_arr);
-    
-    // 4. Apply anti-bot fingerprint rules (Bot Proof checks)
+    // Determine verification based on telemetry score or slider fallback
+    let mut is_human = false;
+    let mut score = 0.0f32;
     let mut bot_flag = false;
 
+    // Apply anti-bot fingerprint rules (Bot Proof checks)
     if client_data.webdriver {
         warn!("Automation detected: navigator.webdriver is true");
-        score = 0.0;
         bot_flag = true;
     }
-
     if client_data.time_taken < 200 {
         warn!("Automation detected: click happened too fast ({}ms)", client_data.time_taken);
-        score = 0.0;
         bot_flag = true;
     }
-
     if client_data.screen.ow == 0 || client_data.screen.oh == 0 {
         warn!("Automation detected: screen size report invalid (0x0 outer)");
-        score = 0.0;
         bot_flag = true;
     }
 
-    if client_data.plugins == 0 {
-        // A common headless indicator, we penalize the score significantly
-        info!("Anti-bot warning: 0 plugins detected. Applying penalty to classification.");
-        score = (score - 0.25).max(0.0);
+    // Check slider fallback puzzle solve status
+    let mut solved_slider = false;
+    let mut is_accessibility = false;
+    
+    if let (Some(x), Some(target)) = (payload.slider_x, payload.slider_target) {
+        if (x - target).abs() <= 6 {
+            solved_slider = true;
+            if client_data.accessibility_mode {
+                is_accessibility = true;
+            }
+        }
     }
 
-    let is_human = score >= state.min_score && !bot_flag;
+    // 1. Passive checking (mouse pointer telemetry)
+    let features_opt = features::extract_features(&client_data.points);
+    
+    let mut features_json = String::new();
+    if let Some(features) = features_opt {
+        features_json = serde_json::to_string(&features).unwrap_or_default();
+        let feature_arr = features.to_array();
+        let mut model_score = state.model.predict(&feature_arr);
+        
+        if client_data.plugins == 0 {
+            model_score = (model_score - 0.25).max(0.0);
+        }
+        
+        score = model_score;
 
-    info!(
-        "Verification: Points: {}, Score: {:.4} ({}), Webdriver: {}, Time: {}ms, Plugins: {}",
-        client_data.points.len(),
-        score,
-        if is_human { "Human" } else { "Bot" },
-        client_data.webdriver,
-        client_data.time_taken,
-        client_data.plugins
-    );
+        // Only allow a passive check pass if the active slider fallback challenge is not being submitted.
+        // If they are submitting the slider, they must pass the solved_slider check in step 2.
+        if !bot_flag && score >= state.min_score && payload.slider_x.is_none() {
+            is_human = true;
+        }
+    }
+
+    // 2. Active fallback check: If passive telemetry failed or was insufficient, check slider puzzle solution
+    if !is_human && !bot_flag {
+        if solved_slider {
+            if is_accessibility {
+                // Keyboard / accessibility user successfully aligned the slider
+                score = 1.0;
+                is_human = true;
+                info!("Accessibility validation succeeded via slider puzzle.");
+            } else {
+                // Mouse user aligned the slider. We check if the drag gesture itself is human.
+                if let Some(features) = features::extract_features(&client_data.points) {
+                    let feature_arr = features.to_array();
+                    let drag_score = state.model.predict(&feature_arr);
+                    if drag_score >= 0.25 {
+                        score = drag_score;
+                        is_human = true;
+                        info!("Slider puzzle verification succeeded with drag score: {:.4}", drag_score);
+                    } else {
+                        warn!("Slider puzzle verification failed: drag score {:.4} below human threshold", drag_score);
+                    }
+                }
+            }
+        }
+    }
 
     // Get client details for logging
     let user_agent = headers
@@ -422,25 +501,31 @@ async fn verify_handler(
         .and_then(|v| v.to_str().ok().map(|s| s.split(',').next().unwrap_or("").trim().to_string()))
         .unwrap_or_else(|| addr.ip().to_string());
 
-    // Log telemetry features and fingerprint stats in database for diagnostics
-    let features_json = serde_json::to_string(&features).unwrap_or_default();
-    if let Ok(conn) = state.db_conn.lock() {
-        if let Err(e) = db::log_telemetry(
-            &conn,
-            client_data.points.len(),
-            score,
-            is_human,
-            client_data.webdriver,
-            user_agent,
-            Some(&ip_address),
-            &features_json,
-            &points_hash,
-        ) {
-            warn!("Failed to log telemetry into SQLite database: {}", e);
-        }
-    }
+    // Send log message to background channel for async persistence (non-blocking)
+    let log_msg = LogMessage {
+        point_count: client_data.points.len(),
+        score,
+        is_human,
+        webdriver: client_data.webdriver,
+        user_agent: user_agent.map(String::from),
+        ip_address: Some(ip_address),
+        features_json,
+        points_hash,
+    };
+    let _ = state.log_tx.try_send(log_msg);
 
-    // 5. Generate token if verification succeeds
+    info!(
+        "Verification result: Points: {}, Score: {:.4} ({}), Webdriver: {}, Time: {}ms, SolvedSlider: {}, Accessibility: {}",
+        client_data.points.len(),
+        score,
+        if is_human { "Human" } else { "Bot" },
+        client_data.webdriver,
+        client_data.time_taken,
+        solved_slider,
+        is_accessibility
+    );
+
+    // 5. Generate token if verification succeeds, or request fallback if telemetry failed
     if is_human {
         let token = crypto::generate_token(&state.secret_key, score);
         Json(VerifyResponse {
@@ -448,13 +533,21 @@ async fn verify_handler(
             score,
             token: Some(token),
             error: None,
+            fallback_required: None,
         })
     } else {
+        // If they haven't tried the slider yet and failed passive check, prompt for fallback
+        let fallback_needed = payload.slider_x.is_none();
         Json(VerifyResponse {
             success: false,
             score,
             token: None,
-            error: Some("Telemetry profile classified as automated bot behavior.".to_string()),
+            error: Some(if fallback_needed {
+                "Behavioral analysis uncertain. Fallback challenge required.".to_string()
+            } else {
+                "Telemetry profile classified as automated bot behavior.".to_string()
+            }),
+            fallback_required: Some(fallback_needed),
         })
     }
 }
@@ -466,21 +559,13 @@ async fn validate_handler(
 ) -> impl IntoResponse {
     info!("Validating token: {:?}", payload.token);
     // 1. Check if token was already validated to prevent token replay attacks
-    if let Ok(conn) = state.db_conn.lock() {
-        match db::is_token_used(&conn, &payload.token) {
-            Ok(true) => {
-                warn!("Replay validation check: Token has already been used.");
-                return Json(ValidateResponse {
-                    success: false,
-                    score: 0.0,
-                    error: Some("Token has already been validated.".to_string()),
-                });
-            }
-            Err(e) => {
-                warn!("Database check for token replay failed: {}", e);
-            }
-            _ => {}
-        }
+    if !state.cache.check_and_insert(format!("token:{}", payload.token), 300) {
+        warn!("Replay validation check: Token has already been used.");
+        return Json(ValidateResponse {
+            success: false,
+            score: 0.0,
+            error: Some("Token has already been validated.".to_string()),
+        });
     }
 
     // Max age for a token is set to 300 seconds (5 minutes)
@@ -488,16 +573,6 @@ async fn validate_handler(
         Ok(score) => {
             if score >= state.min_score {
                 info!("Token validation succeeded. Score: {:.4}", score);
-
-                // Mark token as used to prevent replay
-                if let Ok(conn) = state.db_conn.lock() {
-                    if let Err(e) = db::mark_token_used(&conn, &payload.token) {
-                        warn!("Failed to mark token as used: {}", e);
-                    }
-                    // Prune old tokens to prevent unbounded DB growth
-                    let _ = db::prune_old_tokens(&conn, 300);
-                }
-
                 Json(ValidateResponse {
                     success: true,
                     score,
