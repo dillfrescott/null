@@ -470,6 +470,13 @@
             // Prevent multiple panels from rendering
             if (containerEl.querySelector('#null-slider-panel')) return;
 
+            // Ensure container elements stack vertically if container is a flex container
+            const containerComputedStyle = window.getComputedStyle(containerEl);
+            if (containerComputedStyle.display === 'flex' && containerComputedStyle.flexDirection !== 'column') {
+                containerEl.dataset.originalFlexDirection = containerEl.style.flexDirection;
+                containerEl.style.flexDirection = 'column';
+            }
+
             const sliderPanel = document.createElement('div');
             sliderPanel.id = 'null-slider-panel';
             sliderPanel.style.marginTop = '12px';
@@ -612,6 +619,10 @@
                         widget.className = "captcha-widget verified";
                         textLabel.textContent = "Verification Complete";
                         sliderPanel.remove();
+                        if (containerEl.dataset.originalFlexDirection !== undefined) {
+                            containerEl.style.flexDirection = containerEl.dataset.originalFlexDirection;
+                            delete containerEl.dataset.originalFlexDirection;
+                        }
                         if (options.onSuccess) {
                             setTimeout(() => options.onSuccess(result.token), 500);
                         }
