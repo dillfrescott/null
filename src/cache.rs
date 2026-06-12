@@ -36,4 +36,47 @@ impl MemoryCache {
             true
         }
     }
+
+    pub fn contains(&self, key: &str) -> bool {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let map = self.entries.read().unwrap();
+        map.get(key).map(|&exp| exp > now).unwrap_or(false)
+    }
+
+    pub fn insert(&self, key: String, ttl_secs: u64) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let mut map = self.entries.write().unwrap();
+        map.insert(key, now + ttl_secs);
+    }
+
+    pub fn remove(&self, key: &str) -> bool {
+        let mut map = self.entries.write().unwrap();
+        map.remove(key).is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_cache_operations() {
+        let cache = MemoryCache::new();
+        let key = "test_key".to_string();
+
+        // Check insert and contains
+        assert!(!cache.contains(&key));
+        cache.insert(key.clone(), 2);
+        assert!(cache.contains(&key));
+
+        // Check check_and_insert
+        let key2 = "test_key2".to_string();
+        assert!(cache.check_and_insert(key2.clone(), 5));
+        assert!(!cache.check_and_insert(key2.clone(), 5));
+
+        // Check remove
+        assert!(cache.remove(&key));
+        assert!(!cache.contains(&key));
+        assert!(!cache.remove(&key));
+    }
 }

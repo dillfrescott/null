@@ -508,6 +508,11 @@
             const canvas = containerEl.querySelector('#null-slider-canvas');
             const ctx = canvas.getContext('2d');
             
+            // Adjust canvas for High-DPI (Retina) screens
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = 300 * dpr;
+            canvas.height = 80 * dpr;
+            
             const targetX = this.challenge.sliderTarget;
             const startX = 25;
             let currentX = startX;
@@ -519,6 +524,8 @@
             const selectedShape = shapes[Math.floor(Math.random() * shapes.length)];
 
             const drawPiece = (x) => {
+                ctx.save();
+                ctx.scale(dpr, dpr);
                 ctx.fillStyle = '#111';
                 ctx.fillRect(0, 0, 300, 80);
                 
@@ -591,6 +598,7 @@
                 drawShapePath(x, 40);
                 ctx.fill();
                 ctx.shadowBlur = 0;
+                ctx.restore();
             };
 
             const updateSliderPosition = (x) => {
@@ -643,13 +651,13 @@
             // Keyboard controls for accessibility
             thumb.addEventListener('keydown', (e) => {
                 let keyRecorded = false;
-                if (e.key === 'ArrowRight') {
-                    accessibilityMode = true;
-                    updateSliderPosition(currentX + 5);
-                    keyRecorded = true;
-                } else if (e.key === 'ArrowLeft') {
-                    accessibilityMode = true;
-                    updateSliderPosition(currentX - 5);
+                if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+                    if (!accessibilityMode) {
+                        accessibilityMode = true;
+                        NullCaptcha.points = [];
+                        NullCaptcha.startTime = Date.now();
+                    }
+                    updateSliderPosition(e.key === 'ArrowRight' ? currentX + 5 : currentX - 5);
                     keyRecorded = true;
                 } else if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
@@ -669,6 +677,9 @@
             // Pointer event dragging
             const startDrag = (clientX) => {
                 isDragging = true;
+                // Reset points to ensure telemetry ONLY contains the slider drag gesture
+                NullCaptcha.points = [];
+                NullCaptcha.startTime = Date.now();
                 dragStartMouseX = clientX - currentX;
                 thumb.style.cursor = 'grabbing';
             };

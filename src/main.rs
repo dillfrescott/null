@@ -13,6 +13,7 @@ use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 use hmac::Mac;
 use base64::Engine;
+use subtle::ConstantTimeEq;
 
 mod crypto;
 mod features;
@@ -326,7 +327,10 @@ async fn verify_handler(
     mac.update(expected_payload.as_bytes());
     let expected_signature = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
 
-    if expected_signature != payload.signature {
+    // Constant-time signature verification to prevent timing attacks
+    let sig_bytes = payload.signature.as_bytes();
+    let expected_bytes = expected_signature.as_bytes();
+    if sig_bytes.len() != expected_bytes.len() || sig_bytes.ct_eq(expected_bytes).unwrap_u8() != 1 {
         warn!("Verification challenge signature mismatch!");
         return Json(VerifyResponse {
             success: false,
@@ -354,7 +358,52 @@ async fn verify_handler(
         });
     }
 
-    // 3. Verify Proof of Work
+    // 3. Challenge State Enforcement (Strict Replay & Brute-Force prevention)
+    let consumed_key = format!("salt:consumed:{}", payload.salt);
+    let fallback_key = format!("salt:fallback:{}", payload.salt);
+    
+    // Check if challenge was already marked fully consumed
+    if state.cache.contains(&consumed_key) {
+        warn!("Verification failed: Salt already consumed.");
+        return Json(VerifyResponse {
+            success: false,
+            score: 0.0,
+            token: None,
+            error: Some("Challenge already completed. Re-verification required.".to_string()),
+            fallback_required: None,
+        });
+    }
+
+    if payload.slider_x.is_some() {
+        // If submitting a slider solve, the salt state MUST be "fallback_required"
+        if !state.cache.contains(&fallback_key) {
+            warn!("Verification failed: Attempted to submit slider solve without prior passive fail.");
+            return Json(VerifyResponse {
+                success: false,
+                score: 0.0,
+                token: None,
+                error: Some("Invalid challenge sequence. Re-verification required.".to_string()),
+                fallback_required: None,
+            });
+        }
+        // Immediately invalidate the fallback state so it can never be retried/brute-forced
+        state.cache.remove(&fallback_key);
+        state.cache.insert(consumed_key.clone(), 300);
+    } else {
+        // If submitting a passive check and it was already processed, reject
+        if state.cache.contains(&fallback_key) {
+            warn!("Verification failed: Passive check already attempted and fallback is active.");
+            return Json(VerifyResponse {
+                success: false,
+                score: 0.0,
+                token: None,
+                error: Some("Please complete the slider fallback puzzle.".to_string()),
+                fallback_required: Some(true),
+            });
+        }
+    }
+
+    // 4. Verify Proof of Work
     if !verify_pow(&payload.salt, payload.nonce, payload.difficulty) {
         warn!("Verification PoW mismatch! salt: {}, nonce: {}, diff: {}", payload.salt, payload.nonce, payload.difficulty);
         return Json(VerifyResponse {
@@ -615,17 +664,8 @@ async fn verify_handler(
 
     // 5. Generate token if verification succeeds, or request fallback if telemetry failed
     if is_human {
-        // Prevent salt reuse to prevent replay attacks getting multiple tokens
-        if !state.cache.check_and_insert(format!("salt:{}", payload.salt), 300) {
-            warn!("Verification failed: Salt has already been consumed (replay).");
-            return Json(VerifyResponse {
-                success: false,
-                score: 0.0,
-                token: None,
-                error: Some("Challenge has already been completed. Re-verification required.".to_string()),
-                fallback_required: None,
-            });
-        }
+        // Mark challenge salt as fully consumed
+        state.cache.insert(consumed_key, 300);
 
         let token = crypto::generate_token(&state.secret_key, score);
         Json(VerifyResponse {
@@ -636,8 +676,16 @@ async fn verify_handler(
             fallback_required: None,
         })
     } else {
-        // If they haven't tried the slider yet and failed passive check, prompt for fallback (only if not an obvious bot)
+        // If they haven't tried the slider yet and failed passive check, prompt for fallback
         let fallback_needed = payload.slider_x.is_none() && !bot_flag;
+        if fallback_needed {
+            // Passive check failed, transition to fallback state
+            state.cache.insert(fallback_key, 300);
+        } else {
+            // Obvious bot or failed slider check, mark as consumed
+            state.cache.insert(consumed_key, 300);
+        }
+        
         Json(VerifyResponse {
             success: false,
             score,
