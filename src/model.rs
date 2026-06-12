@@ -245,6 +245,30 @@ impl MLP {
             ], 1.0));
         }
 
+        // 4. Generate Human Slider Drag Features (target = 1.0)
+        // Humans dragging a slider: straight path, but with human speed variations and slight wobble.
+        for _ in 0..500 {
+            let straightness = rng.gen_range(0.96..0.998); // very straight, but not mathematically perfect
+            let avg_speed = rng.gen_range(0.15..0.6);
+            let speed_var = rng.gen_range(0.12..0.5); // human acceleration/deceleration/adjustments
+            let angular_jitter = rng.gen_range(0.01..0.08); // small wobble in y-axis
+            let total_duration = rng.gen_range(0.2..1.0); // realistic time to drag
+            let line_deviation = rng.gen_range(0.002..0.02); // very small perpendicular deviation
+            let point_count = rng.gen_range(0.25..0.7);
+            let entropy = rng.gen_range(0.03..0.2); // low but non-zero direction changes
+
+            dataset.push(([
+                straightness,
+                avg_speed,
+                speed_var,
+                angular_jitter,
+                total_duration,
+                line_deviation,
+                point_count,
+                entropy,
+            ], 1.0));
+        }
+
         dataset
     }
 
@@ -252,8 +276,8 @@ impl MLP {
     pub fn new_default() -> Self {
         let mut model = Self::new_random();
         let dataset = Self::generate_synthetic_dataset();
-        // Train it quickly (takes ~15ms)
-        model.train(&dataset, 150, 0.05);
+        // Train it quickly (takes ~20ms)
+        model.train(&dataset, 200, 0.05);
         model
     }
 }

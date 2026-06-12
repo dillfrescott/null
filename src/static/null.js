@@ -631,15 +631,27 @@
 
             // Keyboard controls for accessibility
             thumb.addEventListener('keydown', (e) => {
+                let keyRecorded = false;
                 if (e.key === 'ArrowRight') {
                     accessibilityMode = true;
                     updateSliderPosition(currentX + 5);
+                    keyRecorded = true;
                 } else if (e.key === 'ArrowLeft') {
                     accessibilityMode = true;
                     updateSliderPosition(currentX - 5);
+                    keyRecorded = true;
                 } else if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
                     submitSliderSolution();
+                }
+
+                if (keyRecorded) {
+                    const now = Date.now();
+                    NullCaptcha.points.push({
+                        x: currentX,
+                        y: -1.0, // special marker for keyboard action
+                        t: now - NullCaptcha.startTime
+                    });
                 }
             });
 

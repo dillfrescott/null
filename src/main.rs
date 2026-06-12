@@ -182,6 +182,10 @@ async fn main() {
     let db_path_clone = db_path.clone();
     tokio::spawn(async move {
         if let Ok(conn) = rusqlite::Connection::open(&db_path_clone) {
+            // Prune old tokens once on startup
+            let _ = db::prune_old_tokens(&conn, 300);
+
+            let mut last_prune = std::time::Instant::now();
             while let Some(msg) = log_rx.recv().await {
                 let _ = db::log_telemetry(
                     &conn,
@@ -194,6 +198,12 @@ async fn main() {
                     &msg.features_json,
                     &msg.points_hash,
                 );
+
+                // Periodically prune tokens every 5 minutes
+                if last_prune.elapsed().as_secs() > 300 {
+                    let _ = db::prune_old_tokens(&conn, 300);
+                    last_prune = std::time::Instant::now();
+                }
             }
         }
     });
@@ -400,8 +410,25 @@ async fn verify_handler(
     // Verify telemetry points are unique to prevent replay of the same movements
     let points_hash = compute_points_hash(&client_data.points);
     if client_data.points.len() >= 5 {
+        // Check in-memory cache first for speed
         if !state.cache.check_and_insert(format!("telemetry:{}", points_hash), 300) {
-            warn!("Verification failed: Replayed telemetry detected!");
+            warn!("Verification failed: Replayed telemetry detected in cache!");
+            return Json(VerifyResponse {
+                success: false,
+                score: 0.0,
+                token: None,
+                error: Some("Automated behavior detected (replayed telemetry).".to_string()),
+                fallback_required: None,
+            });
+        }
+
+        // Check persistent database for replay checks
+        let is_replay = {
+            let conn = state._db_conn.lock().unwrap();
+            db::is_telemetry_replayed(&conn, &points_hash).unwrap_or(false)
+        };
+        if is_replay {
+            warn!("Verification failed: Replayed telemetry detected in database!");
             return Json(VerifyResponse {
                 success: false,
                 score: 0.0,
@@ -444,8 +471,14 @@ async fn verify_handler(
         }
     }
 
+    // Filter out keyboard/accessibility events (y == -1.0) for mouse telemetry extraction
+    let mouse_points: Vec<features::TelemetryPoint> = client_data.points.iter()
+        .filter(|p| (p.y - -1.0).abs() > 0.001)
+        .cloned()
+        .collect();
+
     // 1. Passive checking (mouse pointer telemetry)
-    let features_opt = features::extract_features(&client_data.points);
+    let features_opt = features::extract_features(&mouse_points);
     
     let mut features_json = String::new();
     if let Some(features) = features_opt {
@@ -470,13 +503,48 @@ async fn verify_handler(
     if !is_human && !bot_flag {
         if solved_slider {
             if is_accessibility {
-                // Keyboard / accessibility user successfully aligned the slider
-                score = 1.0;
-                is_human = true;
-                info!("Accessibility validation succeeded via slider puzzle.");
+                // Keyboard / accessibility user successfully aligned the slider.
+                // Verify that keyboard telemetry looks human to prevent simple script bypass.
+                let kb_points: Vec<&features::TelemetryPoint> = client_data.points.iter()
+                    .filter(|p| (p.y - -1.0).abs() < 0.001)
+                    .collect();
+                
+                if kb_points.is_empty() {
+                    warn!("Automation detected: accessibility mode claimed but no keyboard events recorded.");
+                    bot_flag = true;
+                } else {
+                    // Check for automated rapid keystrokes (less than 15ms interval)
+                    let mut too_fast = false;
+                    for i in 0..(kb_points.len() - 1) {
+                        let dt = kb_points[i+1].t - kb_points[i].t;
+                        if dt < 15.0 {
+                            too_fast = true;
+                            break;
+                        }
+                    }
+                    if too_fast {
+                        warn!("Automation detected: keyboard events are too fast (less than 15ms interval)");
+                        bot_flag = true;
+                    } else {
+                        // Check if the number of keypresses matches target distance roughly
+                        // Initial slider position is 25. Each ArrowRight/ArrowLeft moves by 5.
+                        let target_x = payload.slider_x.unwrap_or(25);
+                        let expected_presses = ((target_x - 25).abs() as f32 / 5.0).ceil() as usize;
+                        
+                        // Allow some flexibility but ensure they did at least half of the expected keystrokes
+                        if kb_points.len() < expected_presses / 2 {
+                            warn!("Automation detected: accessibility keypress count {} too low for target distance (expected ~{})", kb_points.len(), expected_presses);
+                            bot_flag = true;
+                        } else {
+                            score = 1.0;
+                            is_human = true;
+                            info!("Accessibility validation succeeded via slider puzzle ({} keypresses).", kb_points.len());
+                        }
+                    }
+                }
             } else {
                 // Mouse user aligned the slider. We check if the drag gesture itself is human.
-                if let Some(features) = features::extract_features(&client_data.points) {
+                if let Some(features) = features::extract_features(&mouse_points) {
                     let feature_arr = features.to_array();
                     let drag_score = state.model.predict(&feature_arr);
                     if drag_score >= 0.25 {
@@ -536,8 +604,8 @@ async fn verify_handler(
             fallback_required: None,
         })
     } else {
-        // If they haven't tried the slider yet and failed passive check, prompt for fallback
-        let fallback_needed = payload.slider_x.is_none();
+        // If they haven't tried the slider yet and failed passive check, prompt for fallback (only if not an obvious bot)
+        let fallback_needed = payload.slider_x.is_none() && !bot_flag;
         Json(VerifyResponse {
             success: false,
             score,
@@ -559,13 +627,34 @@ async fn validate_handler(
 ) -> impl IntoResponse {
     info!("Validating token: {:?}", payload.token);
     // 1. Check if token was already validated to prevent token replay attacks
+    // Check in-memory cache first for speed
     if !state.cache.check_and_insert(format!("token:{}", payload.token), 300) {
-        warn!("Replay validation check: Token has already been used.");
+        warn!("Replay validation check: Token has already been used (cache).");
         return Json(ValidateResponse {
             success: false,
             score: 0.0,
             error: Some("Token has already been validated.".to_string()),
         });
+    }
+
+    // Check persistent database
+    let is_used = {
+        let conn = state._db_conn.lock().unwrap();
+        db::is_token_used(&conn, &payload.token).unwrap_or(false)
+    };
+    if is_used {
+        warn!("Replay validation check: Token has already been used (database).");
+        return Json(ValidateResponse {
+            success: false,
+            score: 0.0,
+            error: Some("Token has already been validated.".to_string()),
+        });
+    }
+
+    // Mark token as used in database
+    {
+        let conn = state._db_conn.lock().unwrap();
+        let _ = db::mark_token_used(&conn, &payload.token);
     }
 
     // Max age for a token is set to 300 seconds (5 minutes)
