@@ -193,6 +193,7 @@
                         align-items: flex-end;
                         gap: 0.15rem;
                         line-height: 1.1;
+                        flex-shrink: 0;
                     }
                     .captcha-brand-logo {
                         font-size: 0.75rem;
@@ -286,7 +287,32 @@
                 }
             };
 
-            checkboxBtn.addEventListener('click', () => runVerification(false));
+            checkboxBtn.addEventListener('click', () => {
+                if (captchaWidget.classList.contains('failed')) {
+                    // Reset challenge state to allow a clean retry
+                    NullCaptcha.challenge = null;
+                    NullCaptcha.isSolved = false;
+                    NullCaptcha.isSolving = false;
+                    NullCaptcha.nonce = 0;
+                    NullCaptcha.points = [];
+                    NullCaptcha.startTime = Date.now();
+
+                    // Remove existing slider panel
+                    const existingSlider = containerEl.querySelector('#null-slider-panel');
+                    if (existingSlider) existingSlider.remove();
+
+                    // Restore layout
+                    if (containerEl.dataset.originalFlexDirection !== undefined) {
+                        containerEl.style.flexDirection = containerEl.dataset.originalFlexDirection;
+                        delete containerEl.dataset.originalFlexDirection;
+                    }
+
+                    // Reset widget visual state
+                    captchaWidget.className = "captcha-widget";
+                    textLabel.textContent = "I'm not a robot";
+                }
+                runVerification(false);
+            });
             if (isAuto) {
                 setTimeout(() => runVerification(true), 50);
             }
@@ -513,15 +539,16 @@
             canvas.width = 300 * dpr;
             canvas.height = 80 * dpr;
             
-            const targetX = this.challenge.sliderTarget;
+            let targetX = this.challenge.sliderTarget;
             const startX = 25;
             let currentX = startX;
             let isDragging = false;
             let dragStartMouseX = 0;
             let accessibilityMode = false;
+            let isResetting = false;
 
             const shapes = ['circle', 'square', 'triangle', 'diamond', 'star'];
-            const selectedShape = shapes[Math.floor(Math.random() * shapes.length)];
+            let selectedShape = shapes[Math.floor(Math.random() * shapes.length)];
 
             const drawPiece = (x) => {
                 ctx.save();
@@ -635,21 +662,74 @@
                             setTimeout(() => options.onSuccess(result.token), 500);
                         }
                     } else {
+                        isResetting = true;
                         widget.className = "captcha-widget failed";
-                        textLabel.textContent = "Verification Failed";
-                        alert(result.error || "Alignment verification failed. Try again.");
+                        textLabel.textContent = "Incorrect. Resetting...";
                         updateSliderPosition(startX);
                         NullCaptcha.points = []; // reset points to collect new gesture telemetry
+                        
+                        // Wait 1 second so the user can see they got it incorrect, then reset
+                        setTimeout(async () => {
+                            try {
+                                // Reset the challenge state so we fetch a brand new one
+                                NullCaptcha.challenge = null;
+                                NullCaptcha.isSolved = false;
+                                NullCaptcha.isSolving = false;
+                                NullCaptcha.nonce = 0;
+                                
+                                // Perform a new passive verify check, which will fail and trigger fallback
+                                const verifyResult = await NullCaptcha.verify({ clearPoints: true });
+                                
+                                if (verifyResult.fallbackRequired) {
+                                    // Assign new target position and a new random shape
+                                    targetX = NullCaptcha.challenge.sliderTarget;
+                                    selectedShape = shapes[Math.floor(Math.random() * shapes.length)];
+                                    currentX = startX;
+                                    
+                                    // Reset widget to prompt the user again
+                                    widget.className = "captcha-widget";
+                                    textLabel.textContent = "Confirm you are human...";
+                                    
+                                    // Redraw the new piece and target on the canvas
+                                    updateSliderPosition(startX);
+                                    isResetting = false;
+                                } else if (verifyResult.success && verifyResult.token) {
+                                    // If somehow the new passive check succeeded directly
+                                    widget.className = "captcha-widget verified";
+                                    textLabel.textContent = "Verification Complete";
+                                    sliderPanel.remove();
+                                    if (containerEl.dataset.originalFlexDirection !== undefined) {
+                                        containerEl.style.flexDirection = containerEl.dataset.originalFlexDirection;
+                                        delete containerEl.dataset.originalFlexDirection;
+                                    }
+                                    if (options.onSuccess) {
+                                        setTimeout(() => options.onSuccess(verifyResult.token), 500);
+                                    }
+                                    isResetting = false;
+                                } else {
+                                    widget.className = "captcha-widget failed";
+                                    textLabel.textContent = "Verification Failed. Click to retry.";
+                                    isResetting = false;
+                                }
+                            } catch (e) {
+                                console.error("Error resetting slider challenge:", e);
+                                widget.className = "captcha-widget failed";
+                                textLabel.textContent = "Error resetting. Click to retry.";
+                                isResetting = false;
+                            }
+                        }, 1000);
                     }
                 } catch (err) {
                     console.error("Slider verification error:", err);
                     widget.className = "captcha-widget failed";
                     textLabel.textContent = "Error";
+                    isResetting = false;
                 }
             };
 
             // Keyboard controls for accessibility
             thumb.addEventListener('keydown', (e) => {
+                if (isResetting) return;
                 let keyRecorded = false;
                 if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
                     if (!accessibilityMode) {
@@ -676,6 +756,7 @@
 
             // Pointer event dragging
             const startDrag = (clientX) => {
+                if (isResetting) return;
                 isDragging = true;
                 // Reset points to ensure telemetry ONLY contains the slider drag gesture
                 NullCaptcha.points = [];
@@ -685,13 +766,13 @@
             };
 
             const doDrag = (clientX) => {
-                if (!isDragging) return;
+                if (!isDragging || isResetting) return;
                 const newX = clientX - dragStartMouseX;
                 updateSliderPosition(newX);
             };
 
             const stopDrag = () => {
-                if (!isDragging) return;
+                if (!isDragging || isResetting) return;
                 isDragging = false;
                 thumb.style.cursor = 'grab';
                 submitSliderSolution();
@@ -736,7 +817,7 @@
             // Build telemetry and client-side fingerprint payload
             const payloadData = {
                 salt: this.challenge.salt,
-                points: this.points,
+                points: sliderParams.clearPoints ? [] : this.points,
                 webdriver: navigator.webdriver || false,
                 plugins: navigator.plugins ? navigator.plugins.length : 0,
                 languages: navigator.languages ? navigator.languages.length : 0,
@@ -777,9 +858,16 @@
                     throw new Error(`Null CAPTCHA Server Error: ${errText}`);
                 }
 
-                return await response.json();
+                const result = await response.json();
+                if (!result.success && !result.fallbackRequired) {
+                    this.isSolved = false;
+                    this.challenge = null;
+                }
+                return result;
             } catch (err) {
                 console.error("Null CAPTCHA verification failed:", err);
+                this.isSolved = false;
+                this.challenge = null;
                 return { success: false, error: err.message };
             }
         },
@@ -825,7 +913,12 @@
                         submitBtn.disabled = false;
                         submitBtn.innerHTML = originalBtnText;
                     }
-                    alert(`Verification Failed: ${res.error || "Please move your mouse or try again."}`);
+                    const textLabel = document.getElementById("null-captcha-text-label");
+                    const captchaWidget = document.getElementById("null-captcha-widget");
+                    if (captchaWidget && textLabel) {
+                        captchaWidget.className = "captcha-widget failed";
+                        textLabel.textContent = "Verification Failed";
+                    }
                 }
             });
         }
