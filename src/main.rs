@@ -188,6 +188,12 @@ async fn main() {
     let model_clone = Arc::clone(&model);
     tokio::spawn(async move {
         if let Ok(conn) = rusqlite::Connection::open(&db_path_clone) {
+            // Configure WAL and busy timeout for the background connection as well
+            let _ = conn.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA busy_timeout = 5000;"
+            );
+
             // Prune old tokens once on startup
             let _ = db::prune_old_tokens(&conn, 300);
 
@@ -545,7 +551,7 @@ async fn verify_handler(
 
     // Verify telemetry points are unique to prevent replay of the same movements
     let points_hash = compute_points_hash(&client_data.points);
-    if client_data.points.len() >= 5 {
+    if !client_data.points.is_empty() {
         // Check in-memory cache first for speed
         if !state.cache.check_and_insert(format!("telemetry:{}", points_hash), 300) {
             warn!("Verification failed: Replayed telemetry detected in cache!");
@@ -726,7 +732,15 @@ async fn verify_handler(
         .unwrap_or_else(|| addr.ip().to_string());
 
     let is_high_confidence = if bot_flag {
-        true
+        // Only mark bot as high confidence for retraining if the telemetry features themselves 
+        // look automated (e.g., straight line, low speed variance/jitter), to prevent poisoning 
+        // by attackers spoofing browser flags with human movements.
+        if let Some(ref features) = features_opt {
+            features.speed_var < 0.35 && features.angular_jitter < 0.05
+        } else {
+            // If there's no telemetry (like accessibility), don't retrain on it
+            false
+        }
     } else if payload.slider_x.is_some() {
         if !is_accessibility {
             if is_human {
@@ -818,7 +832,22 @@ async fn validate_handler(
     Json(payload): Json<ValidatePayload>,
 ) -> impl IntoResponse {
     info!("Validating token: {:?}", payload.token);
-    // 1. Check if token was already validated to prevent token replay attacks
+
+    // 1. Verify token signature and timestamp BEFORE cache and database operations
+    // to prevent database/cache pollution from invalid token spam.
+    let score = match crypto::verify_token(&state.secret_key, &payload.token, 300) {
+        Ok(score) => score,
+        Err(e) => {
+            warn!("Token verification failed: {}", e);
+            return Json(ValidateResponse {
+                success: false,
+                score: 0.0,
+                error: Some(e),
+            });
+        }
+    };
+
+    // 2. Check if token was already validated to prevent token replay attacks
     // Check in-memory cache first for speed
     if !state.cache.check_and_insert(format!("token:{}", payload.token), 300) {
         warn!("Replay validation check: Token has already been used (cache).");
@@ -843,33 +872,21 @@ async fn validate_handler(
         });
     }
 
-    // Max age for a token is set to 300 seconds (5 minutes)
-    match crypto::verify_token(&state.secret_key, &payload.token, 300) {
-        Ok(score) => {
-            if score >= state.min_score {
-                info!("Token validation succeeded. Score: {:.4}", score);
-                Json(ValidateResponse {
-                    success: true,
-                    score,
-                    error: None,
-                })
-            } else {
-                warn!("Token validation failed: Score {:.4} below threshold", score);
-                Json(ValidateResponse {
-                    success: false,
-                    score: 0.0,
-                    error: Some("Token score does not meet human threshold.".to_string()),
-                })
-            }
-        }
-        Err(e) => {
-            warn!("Token validation error: {}", e);
-            Json(ValidateResponse {
-                success: false,
-                score: 0.0,
-                error: Some(e),
-            })
-        }
+    // 3. Check if validation score meets human threshold
+    if score >= state.min_score {
+        info!("Token validation succeeded. Score: {:.4}", score);
+        Json(ValidateResponse {
+            success: true,
+            score,
+            error: None,
+        })
+    } else {
+        warn!("Token validation failed: Score {:.4} below threshold", score);
+        Json(ValidateResponse {
+            success: false,
+            score: 0.0,
+            error: Some("Token score does not meet human threshold.".to_string()),
+        })
     }
 }
 

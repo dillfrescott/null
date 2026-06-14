@@ -5,6 +5,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub fn init_db(db_path: &str) -> Result<Connection> {
     let conn = Connection::open(db_path)?;
 
+    // Enable WAL mode and set a busy timeout of 5 seconds to prevent database locked errors
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA busy_timeout = 5000;"
+    )?;
+
     // 1. Create table for model weights
     conn.execute(
         "CREATE TABLE IF NOT EXISTS model_weights (
