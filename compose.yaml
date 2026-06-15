@@ -12,7 +12,7 @@ services:
       - DATABASE_URL=/app/data/captcha.db
       
       # Minimum score required to pass captcha (0.0 to 1.0)
-      - NULL_CAPTCHA_MIN_SCORE=0.5
+      - NULL_CAPTCHA_MIN_SCORE=0.8
       
       # Proof of Work (PoW) difficulty (higher means more CPU effort required by clients)
       - NULL_CAPTCHA_DIFFICULTY=4
