@@ -26,8 +26,11 @@ impl MemoryCache {
 
         let mut map = self.entries.write().unwrap();
         
-        // Prune expired entries to keep memory footprint bounded
-        map.retain(|_, &mut exp| exp > now);
+        // Prune expired entries to keep memory footprint bounded, but only
+        // occasionally to avoid O(N) scan overhead on every insertion.
+        if map.len() > 1000 || rand::random::<f64>() < 0.02 {
+            map.retain(|_, &mut exp| exp > now);
+        }
 
         if map.contains_key(&key) {
             false

@@ -60,8 +60,6 @@ struct VerifyPayload {
     nonce: u64,
     #[serde(default, rename = "sliderX")]
     slider_x: Option<i32>,
-    #[serde(default, rename = "sliderTarget")]
-    slider_target: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -72,7 +70,6 @@ struct ChallengeResponse {
     encryption_key: String,
     timestamp: u64,
     signature: String,
-    slider_target: i32,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -97,7 +94,7 @@ struct DecryptedPayload {
     accessibility_mode: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct VerifyResponse {
     success: bool,
@@ -106,6 +103,8 @@ struct VerifyResponse {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fallback_required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slider_target: Option<i32>,
 }
 
 #[derive(Deserialize)]
@@ -242,10 +241,10 @@ async fn main() {
                             let val_dataset = dataset[0..val_size].to_vec();
                             let train_dataset = dataset[val_size..].to_vec();
 
-                            // Train a fresh model from scratch on the combined dataset in the background (no locks held)
-                            // This completely avoids weight drift / catastrophic forgetting.
-                            let mut new_model = model::MLP::new_random();
-                            let loss = new_model.train(&train_dataset, 150, 0.04);
+                            // Fine-tune the current model clone in the background instead of training from scratch.
+                            // This provides training stability and preserves learned boundaries.
+                            let mut new_model = model_clone.read().unwrap().clone();
+                            let loss = new_model.train(&train_dataset, 40, 0.015);
                             
                             // Validate model accuracy and verify numerical sanity before promotion
                             let accuracy = new_model.validate(&val_dataset);
@@ -354,6 +353,16 @@ fn verify_pow(salt: &str, nonce: u64, difficulty: u32) -> bool {
     hash_hex.starts_with(&prefix)
 }
 
+fn derive_slider_target(salt: &str, secret: &[u8]) -> i32 {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(salt.as_bytes());
+    hasher.update(secret);
+    let result = hasher.finalize();
+    let val = u32::from_be_bytes([result[0], result[1], result[2], result[3]]);
+    (50 + (val % 200)) as i32
+}
+
 async fn challenge_handler(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -383,10 +392,7 @@ async fn challenge_handler(
         .parse::<u32>()
         .unwrap_or(4);
 
-    // Generate random slider target position for interactive fallback UI
-    let slider_target = rand::thread_rng().gen_range(50..250);
-
-    let sign_payload = format!("{}.{}.{}.{}.{}", now, salt, difficulty, encryption_key, slider_target);
+    let sign_payload = format!("{}.{}.{}.{}", now, salt, difficulty, encryption_key);
     
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&state.secret_key)
         .expect("HMAC sign failed");
@@ -399,7 +405,6 @@ async fn challenge_handler(
         encryption_key,
         timestamp: now,
         signature,
-        slider_target,
     })
 }
 
@@ -411,10 +416,7 @@ async fn verify_handler(
     Json(payload): Json<VerifyPayload>,
 ) -> impl IntoResponse {
     // 1. Verify Challenge Signature
-    let expected_payload = match payload.slider_target {
-        Some(target) => format!("{}.{}.{}.{}.{}", payload.timestamp, payload.salt, payload.difficulty, payload.encryption_key, target),
-        None => format!("{}.{}.{}.{}", payload.timestamp, payload.salt, payload.difficulty, payload.encryption_key),
-    };
+    let expected_payload = format!("{}.{}.{}.{}", payload.timestamp, payload.salt, payload.difficulty, payload.encryption_key);
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&state.secret_key)
         .expect("HMAC verification signature setup failed");
     mac.update(expected_payload.as_bytes());
@@ -426,11 +428,8 @@ async fn verify_handler(
     if sig_bytes.len() != expected_bytes.len() || sig_bytes.ct_eq(expected_bytes).unwrap_u8() != 1 {
         warn!("Verification challenge signature mismatch!");
         return Json(VerifyResponse {
-            success: false,
-            score: 0.0,
-            token: None,
             error: Some("Invalid challenge signature. Re-verification required.".to_string()),
-            fallback_required: None,
+            ..Default::default()
         });
     }
 
@@ -443,11 +442,8 @@ async fn verify_handler(
     if now < payload.timestamp || now - payload.timestamp > 300 {
         warn!("Verification challenge expired! now: {}, challenge: {}", now, payload.timestamp);
         return Json(VerifyResponse {
-            success: false,
-            score: 0.0,
-            token: None,
             error: Some("Verification challenge expired. Please retry.".to_string()),
-            fallback_required: None,
+            ..Default::default()
         });
     }
 
@@ -459,11 +455,8 @@ async fn verify_handler(
     if state.cache.contains(&consumed_key) {
         warn!("Verification failed: Salt already consumed.");
         return Json(VerifyResponse {
-            success: false,
-            score: 0.0,
-            token: None,
             error: Some("Challenge already completed. Re-verification required.".to_string()),
-            fallback_required: None,
+            ..Default::default()
         });
     }
 
@@ -472,11 +465,8 @@ async fn verify_handler(
         if !state.cache.contains(&fallback_key) {
             warn!("Verification failed: Attempted to submit slider solve without prior passive fail.");
             return Json(VerifyResponse {
-                success: false,
-                score: 0.0,
-                token: None,
                 error: Some("Invalid challenge sequence. Re-verification required.".to_string()),
-                fallback_required: None,
+                ..Default::default()
             });
         }
         // Immediately invalidate the fallback state so it can never be retried/brute-forced
@@ -487,11 +477,9 @@ async fn verify_handler(
         if state.cache.contains(&fallback_key) {
             warn!("Verification failed: Passive check already attempted and fallback is active.");
             return Json(VerifyResponse {
-                success: false,
-                score: 0.0,
-                token: None,
                 error: Some("Please complete the slider fallback puzzle.".to_string()),
                 fallback_required: Some(true),
+                ..Default::default()
             });
         }
     }
@@ -500,11 +488,8 @@ async fn verify_handler(
     if !verify_pow(&payload.salt, payload.nonce, payload.difficulty) {
         warn!("Verification PoW mismatch! salt: {}, nonce: {}, diff: {}", payload.salt, payload.nonce, payload.difficulty);
         return Json(VerifyResponse {
-            success: false,
-            score: 0.0,
-            token: None,
             error: Some("Invalid Proof of Work solution.".to_string()),
-            fallback_required: None,
+            ..Default::default()
         });
     }
 
@@ -514,11 +499,8 @@ async fn verify_handler(
         Err(e) => {
             warn!("Payload decryption failed: {}", e);
             return Json(VerifyResponse {
-                success: false,
-                score: 0.0,
-                token: None,
                 error: Some("Payload validation failed. Ensure JS client is up to date.".to_string()),
-                fallback_required: None,
+                ..Default::default()
             });
         }
     };
@@ -528,11 +510,8 @@ async fn verify_handler(
         Err(e) => {
             warn!("Failed to parse decrypted JSON: {}", e);
             return Json(VerifyResponse {
-                success: false,
-                score: 0.0,
-                token: None,
                 error: Some("Telemetry structure mismatch.".to_string()),
-                fallback_required: None,
+                ..Default::default()
             });
         }
     };
@@ -541,11 +520,8 @@ async fn verify_handler(
     if client_data.salt != payload.salt {
         warn!("Verification failed: Telemetry salt mismatch!");
         return Json(VerifyResponse {
-            success: false,
-            score: 0.0,
-            token: None,
             error: Some("Telemetry payload is not bound to this challenge.".to_string()),
-            fallback_required: None,
+            ..Default::default()
         });
     }
 
@@ -556,11 +532,8 @@ async fn verify_handler(
         if !state.cache.check_and_insert(format!("telemetry:{}", points_hash), 300) {
             warn!("Verification failed: Replayed telemetry detected in cache!");
             return Json(VerifyResponse {
-                success: false,
-                score: 0.0,
-                token: None,
                 error: Some("Automated behavior detected (replayed telemetry).".to_string()),
-                fallback_required: None,
+                ..Default::default()
             });
         }
 
@@ -572,11 +545,8 @@ async fn verify_handler(
         if is_replay {
             warn!("Verification failed: Replayed telemetry detected in database!");
             return Json(VerifyResponse {
-                success: false,
-                score: 0.0,
-                token: None,
                 error: Some("Automated behavior detected (replayed telemetry).".to_string()),
-                fallback_required: None,
+                ..Default::default()
             });
         }
     }
@@ -603,8 +573,9 @@ async fn verify_handler(
     // Check slider fallback puzzle solve status
     let mut solved_slider = false;
     let mut is_accessibility = false;
+    let target = derive_slider_target(&payload.salt, &state.secret_key);
     
-    if let (Some(x), Some(target)) = (payload.slider_x, payload.slider_target) {
+    if let Some(x) = payload.slider_x {
         if (x - target).abs() <= 6 {
             solved_slider = true;
             if client_data.accessibility_mode {
@@ -738,29 +709,22 @@ async fn verify_handler(
         if let Some(ref features) = features_opt {
             features.speed_var < 0.35 && features.angular_jitter < 0.05
         } else {
-            // If there's no telemetry (like accessibility), don't retrain on it
-            false
-        }
-    } else if payload.slider_x.is_some() {
-        if !is_accessibility {
-            if is_human {
-                // Only mark as high confidence human if mouse features exhibit typical human variance
-                if let Some(ref features) = features_opt {
-                    features.speed_var >= 0.08 &&
-                    features.total_duration >= 0.075 && // 0.075 is 150ms normalized (duration / 2000.0)
-                    (features.angular_jitter >= 0.005 || features.line_deviation >= 0.001)
-                } else {
-                    false
-                }
-            } else {
-                // If they solved the slider but drag features were classified as bot-like, it is likely a bot solver
-                true
-            }
-        } else {
             false
         }
     } else {
-        false
+        if is_human {
+            // Only mark as high confidence human if mouse features exhibit typical human variance
+            if let Some(ref features) = features_opt {
+                features.speed_var >= 0.08 &&
+                features.total_duration >= 0.075 && // 0.075 is 150ms normalized (duration / 2000.0)
+                (features.angular_jitter >= 0.005 || features.line_deviation >= 0.001)
+            } else {
+                false
+            }
+        } else {
+            // If they attempted the slider but drag features were classified as bot-like
+            payload.slider_x.is_some() && !is_accessibility
+        }
     };
 
     // Send log message to background channel for async persistence (non-blocking)
@@ -800,13 +764,16 @@ async fn verify_handler(
             token: Some(token),
             error: None,
             fallback_required: None,
+            slider_target: None,
         })
     } else {
         // If they haven't tried the slider yet and failed passive check, prompt for fallback
         let fallback_needed = payload.slider_x.is_none() && !bot_flag;
+        let mut target_val = None;
         if fallback_needed {
             // Passive check failed, transition to fallback state
             state.cache.insert(fallback_key, 300);
+            target_val = Some(derive_slider_target(&payload.salt, &state.secret_key));
         } else {
             // Obvious bot or failed slider check, mark as consumed
             state.cache.insert(consumed_key, 300);
@@ -822,6 +789,7 @@ async fn verify_handler(
                 "Telemetry profile classified as automated bot behavior.".to_string()
             }),
             fallback_required: Some(fallback_needed),
+            slider_target: target_val,
         })
     }
 }

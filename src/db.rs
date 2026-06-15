@@ -64,6 +64,12 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
         [],
     )?;
 
+    // Create index on validated_at for used_tokens to speed up token pruning
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_used_tokens_validated_at ON used_tokens (validated_at)",
+        [],
+    )?;
+
     Ok(conn)
 }
 

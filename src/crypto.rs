@@ -45,25 +45,24 @@ pub fn generate_token(secret: &[u8], score: f32) -> String {
         .map(char::from)
         .collect();
 
-    let payload = format!("{}.{:.4}.{}", now, score, nonce);
+    let payload = format!("{}|{:.4}|{}", now, score, nonce);
     
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC can take key of any size");
     mac.update(payload.as_bytes());
     let signature = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
 
-    format!("{}.{}", payload, signature)
+    format!("{}|{}", payload, signature)
 }
 
 pub fn verify_token(secret: &[u8], token: &str, max_age_secs: u64) -> Result<f32, String> {
-    let parts: Vec<&str> = token.split('.').collect();
-    let (timestamp_str, score_str, nonce_str, signature_str) = match parts.len() {
-        4 => (parts[0], parts[1].to_string(), parts[2], parts[3]),
-        5 => (parts[0], format!("{}.{}", parts[1], parts[2]), parts[3], parts[4]),
-        _ => return Err("Invalid token format. Must be timestamp.score.nonce.signature".to_string()),
-    };
+    let parts: Vec<&str> = token.split('|').collect();
+    if parts.len() != 4 {
+        return Err("Invalid token format. Must be timestamp|score|nonce|signature".to_string());
+    }
+    let (timestamp_str, score_str, nonce_str, signature_str) = (parts[0], parts[1], parts[2], parts[3]);
 
     // Reconstruct payload
-    let payload = format!("{}.{}.{}", timestamp_str, score_str, nonce_str);
+    let payload = format!("{}|{}|{}", timestamp_str, score_str, nonce_str);
 
     // Verify HMAC signature
     let decoded_signature = URL_SAFE_NO_PAD

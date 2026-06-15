@@ -539,7 +539,7 @@
             canvas.width = 300 * dpr;
             canvas.height = 80 * dpr;
             
-            let targetX = this.challenge.sliderTarget;
+            let targetX = verifyResult.sliderTarget || 150;
             const startX = 25;
             let currentX = startX;
             let isDragging = false;
@@ -682,7 +682,7 @@
                                 
                                 if (verifyResult.fallbackRequired) {
                                     // Assign new target position and a new random shape
-                                    targetX = NullCaptcha.challenge.sliderTarget;
+                                    targetX = verifyResult.sliderTarget || 150;
                                     selectedShape = shapes[Math.floor(Math.random() * shapes.length)];
                                     currentX = startX;
                                     
@@ -849,7 +849,7 @@
                         encryptionKey: this.challenge.encryptionKey,
                         nonce: this.nonce,
                         sliderX: (sliderParams.sliderX !== undefined && sliderParams.sliderX !== null) ? sliderParams.sliderX : null,
-                        sliderTarget: (sliderParams.sliderTarget !== undefined && sliderParams.sliderTarget !== null) ? sliderParams.sliderTarget : (this.challenge ? this.challenge.sliderTarget : null)
+                        sliderTarget: (sliderParams.sliderTarget !== undefined && sliderParams.sliderTarget !== null) ? sliderParams.sliderTarget : null
                     })
                 });
 
