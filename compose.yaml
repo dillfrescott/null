@@ -15,7 +15,7 @@ services:
       - NULL_CAPTCHA_MIN_SCORE=0.8
       
       # Proof of Work (PoW) difficulty (higher means more CPU effort required by clients)
-      - NULL_CAPTCHA_DIFFICULTY=4.5
+      - NULL_CAPTCHA_DIFFICULTY=4.6
       
       # Secret key used to sign and verify captcha tokens.
       # WARNING: Change this in production! If not set, a random one is generated on startup.
