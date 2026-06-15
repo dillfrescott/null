@@ -1,0 +1,30 @@
+services:
+  null-captcha:
+    image: xdillfrescott/null:latest
+    container_name: null-captcha
+    ports:
+      - "3000:3000"
+    environment:
+      # Port inside the container (matches EXPOSE in Dockerfile)
+      - PORT=3000
+      
+      # Path to SQLite database file inside the container
+      - DATABASE_URL=/app/data/captcha.db
+      
+      # Minimum score required to pass captcha (0.0 to 1.0)
+      - NULL_CAPTCHA_MIN_SCORE=0.5
+      
+      # Proof of Work (PoW) difficulty (higher means more CPU effort required by clients)
+      - NULL_CAPTCHA_DIFFICULTY=4
+      
+      # Secret key used to sign and verify captcha tokens.
+      # WARNING: Change this in production! If not set, a random one is generated on startup.
+      # - NULL_CAPTCHA_SECRET=your_super_secret_key_change_me
+      
+      # Public URL of the app. If set, restricts access via Host header matching.
+      # Leave commented out for local development / testing.
+      # - URL=http://localhost:3000
+    volumes:
+      # Persists SQLite database across container restarts/rebuilds
+      - ./captcha_data:/app/data
+    restart: unless-stopped
