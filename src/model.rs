@@ -1,46 +1,57 @@
 use serde::{Deserialize, Serialize};
 use rand::Rng;
 
+const T: usize = 13;
+const D: usize = 16;
+const D_FF: usize = 32;
+const NUM_HEADS: usize = 2;
+const HEAD_DIM: usize = D / NUM_HEADS;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MiniTransformer {
-    // Input sequence size T = 8 (features), embedding dimension D = 16
-    pub w_emb: [[f32; 16]; 8],
-    pub e_pos: [[f32; 16]; 8],
+    // Input sequence size T = 13 (features), embedding dimension D = 16
+    pub w_emb: [[f32; D]; T],
+    pub e_pos: [[f32; D]; T],
     
-    // Self-Attention projections (Q, K, V)
-    pub w_q: [[f32; 16]; 16],
-    pub b_q: [f32; 16],
-    pub w_k: [[f32; 16]; 16],
-    pub b_k: [f32; 16],
-    pub w_v: [[f32; 16]; 16],
-    pub b_v: [f32; 16],
+    // Self-Attention projections (Q, K, V) -> D x D
+    pub w_q: [[f32; D]; D],
+    pub b_q: [f32; D],
+    pub w_k: [[f32; D]; D],
+    pub b_k: [f32; D],
+    pub w_v: [[f32; D]; D],
+    pub b_v: [f32; D],
 
     // Feed-Forward network (FFN) with D_FF = 32
-    pub w1: [[f32; 32]; 16],
-    pub b1: [f32; 32],
-    pub w2: [[f32; 16]; 32],
-    pub b2: [f32; 16],
+    pub w1: [[f32; D_FF]; D],
+    pub b1: [f32; D_FF],
+    pub w2: [[f32; D]; D_FF],
+    pub b2: [f32; D],
 
     // Classification Head
-    pub w_out: [f32; 16],
+    pub w_out: [f32; D],
     pub b_out: f32,
 }
 
 #[allow(dead_code)]
 struct TransformerForwardCache {
-    x_emb: [[f32; 16]; 8],
-    q: [[f32; 16]; 8],
-    k: [[f32; 16]; 8],
-    v: [[f32; 16]; 8],
-    s: [[f32; 8]; 8],
-    a: [[f32; 8]; 8],
-    o: [[f32; 16]; 8],
-    x_prime: [[f32; 16]; 8],
-    h_raw: [[f32; 32]; 8],
-    h_act: [[f32; 32]; 8],
-    f: [[f32; 16]; 8],
-    x_double_prime: [[f32; 16]; 8],
-    p: [f32; 16],
+    x_emb: [[f32; D]; T],
+    q: [[f32; D]; T],
+    k: [[f32; D]; T],
+    v: [[f32; D]; T],
+    // Multi-head attention: 2 heads of HEAD_DIM
+    s0: [[f32; T]; T],
+    a0: [[f32; T]; T],
+    o0: [[f32; HEAD_DIM]; T],
+    s1: [[f32; T]; T],
+    a1: [[f32; T]; T],
+    o1: [[f32; HEAD_DIM]; T],
+    o: [[f32; D]; T],
+    x_prime: [[f32; D]; T],
+    h_raw: [[f32; D_FF]; T],
+    h_act: [[f32; D_FF]; T],
+    f: [[f32; D]; T],
+    x_double_prime: [[f32; D]; T],
+    p: [f32; D],
     z: f32,
     y: f32,
 }
@@ -48,16 +59,6 @@ struct TransformerForwardCache {
 impl MiniTransformer {
     pub fn new_random() -> Self {
         let mut rng = rand::thread_rng();
-        
-        let mut w_emb = [[0.0f32; 16]; 8];
-        let mut e_pos = [[0.0f32; 16]; 8];
-        let mut w_q = [[0.0f32; 16]; 16];
-        let mut w_k = [[0.0f32; 16]; 16];
-        let mut w_v = [[0.0f32; 16]; 16];
-        let mut w1 = [[0.0f32; 32]; 16];
-        let mut w2 = [[0.0f32; 16]; 32];
-        let mut w_out = [0.0f32; 16];
-
         let mut fill_matrix = |mat: &mut [f32], rows: usize, cols: usize| {
             let limit = (6.0 / (rows + cols) as f32).sqrt();
             for val in mat.iter_mut() {
@@ -65,29 +66,29 @@ impl MiniTransformer {
             }
         };
 
+        let mut w_emb = [[0.0f32; D]; T];
+        let mut e_pos = [[0.0f32; D]; T];
         for row in w_emb.iter_mut() {
-            fill_matrix(row, 8, 16);
+            fill_matrix(row, T, D);
         }
         for row in e_pos.iter_mut() {
-            fill_matrix(row, 8, 16);
+            fill_matrix(row, T, D);
         }
-        for row in w_q.iter_mut() {
-            fill_matrix(row, 16, 16);
-        }
-        for row in w_k.iter_mut() {
-            fill_matrix(row, 16, 16);
-        }
-        for row in w_v.iter_mut() {
-            fill_matrix(row, 16, 16);
-        }
-        for row in w1.iter_mut() {
-            fill_matrix(row, 16, 32);
-        }
-        for row in w2.iter_mut() {
-            fill_matrix(row, 32, 16);
-        }
-        
-        let limit = (6.0f32 / (16.0f32 + 1.0f32)).sqrt();
+
+        let mut w_q = [[0.0f32; D]; D];
+        let mut w_k = [[0.0f32; D]; D];
+        let mut w_v = [[0.0f32; D]; D];
+        for row in w_q.iter_mut() { fill_matrix(row, D, D); }
+        for row in w_k.iter_mut() { fill_matrix(row, D, D); }
+        for row in w_v.iter_mut() { fill_matrix(row, D, D); }
+
+        let mut w1 = [[0.0f32; D_FF]; D];
+        let mut w2 = [[0.0f32; D]; D_FF];
+        for row in w1.iter_mut() { fill_matrix(row, D, D_FF); }
+        for row in w2.iter_mut() { fill_matrix(row, D_FF, D); }
+
+        let mut w_out = [0.0f32; D];
+        let limit = (6.0f32 / (D as f32 + 1.0f32)).sqrt();
         for val in w_out.iter_mut() {
             *val = rng.gen_range(-limit..limit);
         }
@@ -96,15 +97,15 @@ impl MiniTransformer {
             w_emb,
             e_pos,
             w_q,
-            b_q: [0.0; 16],
+            b_q: [0.0; D],
             w_k,
-            b_k: [0.0; 16],
+            b_k: [0.0; D],
             w_v,
-            b_v: [0.0; 16],
+            b_v: [0.0; D],
             w1,
-            b1: [0.0; 32],
+            b1: [0.0; D_FF],
             w2,
-            b2: [0.0; 16],
+            b2: [0.0; D],
             w_out,
             b_out: 0.0,
         }
@@ -115,31 +116,87 @@ impl MiniTransformer {
         1.0 / (1.0 + (-x).exp())
     }
 
-    // Forward pass
-    fn forward(&self, x: &[f32; 8]) -> TransformerForwardCache {
-        let t = 8;
-        let d = 16;
-        let d_ff = 32;
+    // Softmax helper for a single row
+    fn softmax_row(row: &[f32; T]) -> [f32; T] {
+        let mut max_val = row[0];
+        for j in 1..T {
+            if row[j] > max_val { max_val = row[j]; }
+        }
+        let mut exps = [0.0f32; T];
+        let mut sum_exp = 0.0f32;
+        for j in 0..T {
+            let v = (row[j] - max_val).exp();
+            exps[j] = v;
+            sum_exp += v;
+        }
+        for j in 0..T {
+            exps[j] /= sum_exp;
+        }
+        exps
+    }
 
+    // Attention sub-function for one head (head_offset: 0 or HEAD_DIM)
+    // Given Qh, Kh, Vh each [T; HEAD_DIM], returns (s, a, o) where o is [T; HEAD_DIM]
+    fn attention_head(
+        q: &[[f32; D]; T],
+        k: &[[f32; D]; T],
+        v: &[[f32; D]; T],
+        head_offset: usize,
+    ) -> ([[f32; T]; T], [[f32; T]; T], [[f32; HEAD_DIM]; T]) {
+        let scale = 1.0 / (HEAD_DIM as f32).sqrt();
+        let mut s = [[0.0f32; T]; T];
+        let mut a = [[0.0f32; T]; T];
+        let mut o = [[0.0f32; HEAD_DIM]; T];
+
+        for i in 0..T {
+            for j in 0..T {
+                let mut sum = 0.0f32;
+                for m in 0..HEAD_DIM {
+                    sum += q[i][head_offset + m] * k[j][head_offset + m];
+                }
+                s[i][j] = sum * scale;
+            }
+        }
+
+        for i in 0..T {
+            let soft = Self::softmax_row(&s[i]);
+            a[i] = soft;
+        }
+
+        for i in 0..T {
+            for j in 0..HEAD_DIM {
+                let mut sum = 0.0f32;
+                for m in 0..T {
+                    sum += a[i][m] * v[m][head_offset + j];
+                }
+                o[i][j] = sum;
+            }
+        }
+
+        (s, a, o)
+    }
+
+    // Forward pass
+    fn forward(&self, x: &[f32; T]) -> TransformerForwardCache {
         // 1. Embeddings: X_i,j = x_i * w_emb_i,j + e_pos_i,j
-        let mut x_emb = [[0.0f32; 16]; 8];
-        for i in 0..t {
-            for j in 0..d {
+        let mut x_emb = [[0.0f32; D]; T];
+        for i in 0..T {
+            for j in 0..D {
                 x_emb[i][j] = x[i] * self.w_emb[i][j] + self.e_pos[i][j];
             }
         }
 
         // 2. Q, K, V Projections
-        let mut q = [[0.0f32; 16]; 8];
-        let mut k = [[0.0f32; 16]; 8];
-        let mut v = [[0.0f32; 16]; 8];
+        let mut q = [[0.0f32; D]; T];
+        let mut k = [[0.0f32; D]; T];
+        let mut v = [[0.0f32; D]; T];
 
-        for i in 0..t {
-            for j in 0..d {
+        for i in 0..T {
+            for j in 0..D {
                 let mut q_sum = self.b_q[j];
                 let mut k_sum = self.b_k[j];
                 let mut v_sum = self.b_v[j];
-                for m in 0..d {
+                for m in 0..D {
                     q_sum += x_emb[i][m] * self.w_q[m][j];
                     k_sum += x_emb[i][m] * self.w_k[m][j];
                     v_sum += x_emb[i][m] * self.w_v[m][j];
@@ -150,67 +207,34 @@ impl MiniTransformer {
             }
         }
 
-        // 3. Attention logits: S_i,j = (1 / sqrt(d)) * sum_m (Q_i,m * K_j,m)
-        let scale = 1.0 / (d as f32).sqrt();
-        let mut s = [[0.0f32; 8]; 8];
-        for i in 0..t {
-            for j in 0..t {
-                let mut sum = 0.0f32;
-                for m in 0..d {
-                    sum += q[i][m] * k[j][m];
-                }
-                s[i][j] = sum * scale;
+        // 3. Multi-head attention (2 heads of HEAD_DIM)
+        let (s0, a0, o0) = Self::attention_head(&q, &k, &v, 0);
+        let (s1, a1, o1) = Self::attention_head(&q, &k, &v, HEAD_DIM);
+
+        // 4. Concatenate heads
+        let mut o = [[0.0f32; D]; T];
+        for i in 0..T {
+            for j in 0..HEAD_DIM {
+                o[i][j] = o0[i][j];
+                o[i][HEAD_DIM + j] = o1[i][j];
             }
         }
 
-        // 4. Softmax over rows to get A
-        let mut a = [[0.0f32; 8]; 8];
-        for i in 0..t {
-            let mut max_val = s[i][0];
-            for j in 1..t {
-                if s[i][j] > max_val {
-                    max_val = s[i][j];
-                }
-            }
-            let mut sum_exp = 0.0f32;
-            let mut exps = [0.0f32; 8];
-            for j in 0..t {
-                let exp_val = (s[i][j] - max_val).exp();
-                exps[j] = exp_val;
-                sum_exp += exp_val;
-            }
-            for j in 0..t {
-                a[i][j] = exps[j] / sum_exp;
-            }
-        }
-
-        // 5. Attention output: O_i,j = sum_m (A_i,m * V_m,j)
-        let mut o = [[0.0f32; 16]; 8];
-        for i in 0..t {
-            for j in 0..d {
-                let mut sum = 0.0f32;
-                for m in 0..t {
-                    sum += a[i][m] * v[m][j];
-                }
-                o[i][j] = sum;
-            }
-        }
-
-        // 6. First residual: X'_i,j = X_emb_i,j + O_i,j
-        let mut x_prime = [[0.0f32; 16]; 8];
-        for i in 0..t {
-            for j in 0..d {
+        // 5. First residual: X'_i,j = X_emb_i,j + O_i,j
+        let mut x_prime = [[0.0f32; D]; T];
+        for i in 0..T {
+            for j in 0..D {
                 x_prime[i][j] = x_emb[i][j] + o[i][j];
             }
         }
 
-        // 7. FFN Layer 1 (ReLU): H_i,j = ReLU( b1_j + sum_m (X'_i,m * W1_m,j) )
-        let mut h_raw = [[0.0f32; 32]; 8];
-        let mut h_act = [[0.0f32; 32]; 8];
-        for i in 0..t {
-            for j in 0..d_ff {
+        // 6. FFN Layer 1 (ReLU): H_i,j = ReLU( b1_j + sum_m (X'_i,m * W1_m,j) )
+        let mut h_raw = [[0.0f32; D_FF]; T];
+        let mut h_act = [[0.0f32; D_FF]; T];
+        for i in 0..T {
+            for j in 0..D_FF {
                 let mut sum = self.b1[j];
-                for m in 0..d {
+                for m in 0..D {
                     sum += x_prime[i][m] * self.w1[m][j];
                 }
                 h_raw[i][j] = sum;
@@ -218,39 +242,39 @@ impl MiniTransformer {
             }
         }
 
-        // 8. FFN Layer 2: F_i,j = b2_j + sum_m (H_i,m * W2_m,j)
-        let mut f = [[0.0f32; 16]; 8];
-        for i in 0..t {
-            for j in 0..d {
+        // 7. FFN Layer 2: F_i,j = b2_j + sum_m (H_i,m * W2_m,j)
+        let mut f = [[0.0f32; D]; T];
+        for i in 0..T {
+            for j in 0..D {
                 let mut sum = self.b2[j];
-                for m in 0..d_ff {
+                for m in 0..D_FF {
                     sum += h_act[i][m] * self.w2[m][j];
                 }
                 f[i][j] = sum;
             }
         }
 
-        // 9. Second residual: X''_i,j = X'_i,j + F_i,j
-        let mut x_double_prime = [[0.0f32; 16]; 8];
-        for i in 0..t {
-            for j in 0..d {
+        // 8. Second residual: X''_i,j = X'_i,j + F_i,j
+        let mut x_double_prime = [[0.0f32; D]; T];
+        for i in 0..T {
+            for j in 0..D {
                 x_double_prime[i][j] = x_prime[i][j] + f[i][j];
             }
         }
 
-        // 10. Average pooling: P_j = (1 / T) * sum_i (X''_i,j)
-        let mut p = [0.0f32; 16];
-        for j in 0..d {
+        // 9. Average pooling: P_j = (1 / T) * sum_i (X''_i,j)
+        let mut p = [0.0f32; D];
+        for j in 0..D {
             let mut sum = 0.0f32;
-            for i in 0..t {
+            for i in 0..T {
                 sum += x_double_prime[i][j];
             }
-            p[j] = sum / (t as f32);
+            p[j] = sum / (T as f32);
         }
 
-        // 11. Output layer: z = b_out + sum_j (P_j * W_out_j)
+        // 10. Output layer: z = b_out + sum_j (P_j * W_out_j)
         let mut z = self.b_out;
-        for j in 0..d {
+        for j in 0..D {
             z += p[j] * self.w_out[j];
         }
         let y = Self::sigmoid(z);
@@ -260,8 +284,12 @@ impl MiniTransformer {
             q,
             k,
             v,
-            s,
-            a,
+            s0,
+            a0,
+            o0,
+            s1,
+            a1,
+            o1,
             o,
             x_prime,
             h_raw,
@@ -276,37 +304,33 @@ impl MiniTransformer {
 
     /// Predict the probability of the input being human.
     /// Returns a value between 0.0 (Bot) and 1.0 (Human).
-    pub fn predict(&self, input: &[f32; 8]) -> f32 {
+    pub fn predict(&self, input: &[f32; T]) -> f32 {
         let cache = self.forward(input);
         cache.y
     }
 
     /// Train the MiniTransformer on a dataset of (input, target) pairs.
     /// target: 1.0 for Human, 0.0 for Bot.
-    pub fn train(&mut self, dataset: &[([f32; 8], f32)], epochs: usize, lr: f32) -> f32 {
+    pub fn train(&mut self, dataset: &[([f32; T], f32)], epochs: usize, lr: f32) -> f32 {
         use rand::seq::SliceRandom;
         let mut total_loss = 0.0;
         let mut rng = rand::thread_rng();
         let mut shuffled_dataset = dataset.to_vec();
 
-        let t = 8;
-        let d = 16;
-        let d_ff = 32;
-
         // Initialize momentum velocities
-        let mut v_w_emb = [[0.0f32; 16]; 8];
-        let mut v_e_pos = [[0.0f32; 16]; 8];
-        let mut v_w_q = [[0.0f32; 16]; 16];
-        let mut v_b_q = [0.0f32; 16];
-        let mut v_w_k = [[0.0f32; 16]; 16];
-        let mut v_b_k = [0.0f32; 16];
-        let mut v_w_v = [[0.0f32; 16]; 16];
-        let mut v_b_v = [0.0f32; 16];
-        let mut v_w1 = [[0.0f32; 32]; 16];
-        let mut v_b1 = [0.0f32; 32];
-        let mut v_w2 = [[0.0f32; 16]; 32];
-        let mut v_b2 = [0.0f32; 16];
-        let mut v_w_out = [0.0f32; 16];
+        let mut v_w_emb = [[0.0f32; D]; T];
+        let mut v_e_pos = [[0.0f32; D]; T];
+        let mut v_w_q = [[0.0f32; D]; D];
+        let mut v_b_q = [0.0f32; D];
+        let mut v_w_k = [[0.0f32; D]; D];
+        let mut v_b_k = [0.0f32; D];
+        let mut v_w_v = [[0.0f32; D]; D];
+        let mut v_b_v = [0.0f32; D];
+        let mut v_w1 = [[0.0f32; D_FF]; D];
+        let mut v_b1 = [0.0f32; D_FF];
+        let mut v_w2 = [[0.0f32; D]; D_FF];
+        let mut v_b2 = [0.0f32; D];
+        let mut v_w_out = [0.0f32; D];
         let mut v_b_out = 0.0f32;
 
         let momentum = 0.9f32;
@@ -328,62 +352,62 @@ impl MiniTransformer {
                 let d_z = 2.0 * error * cache.y * (1.0 - cache.y);
 
                 let d_b_out = d_z;
-                let mut d_w_out = [0.0f32; 16];
-                let mut d_p = [0.0f32; 16];
-                for j in 0..d {
+                let mut d_w_out = [0.0f32; D];
+                let mut d_p = [0.0f32; D];
+                for j in 0..D {
                     d_w_out[j] = d_z * cache.p[j];
                     d_p[j] = d_z * self.w_out[j];
                 }
 
                 // Average pooling
-                let mut d_x_double_prime = [[0.0f32; 16]; 8];
-                for i in 0..t {
-                    for j in 0..d {
-                        d_x_double_prime[i][j] = d_p[j] / (t as f32);
+                let mut d_x_double_prime = [[0.0f32; D]; T];
+                for i in 0..T {
+                    for j in 0..D {
+                        d_x_double_prime[i][j] = d_p[j] / (T as f32);
                     }
                 }
 
                 // Second residual connection
-                let mut d_f = [[0.0f32; 16]; 8];
-                let mut d_x_prime = [[0.0f32; 16]; 8];
-                for i in 0..t {
-                    for j in 0..d {
+                let mut d_f = [[0.0f32; D]; T];
+                let mut d_x_prime = [[0.0f32; D]; T];
+                for i in 0..T {
+                    for j in 0..D {
                         d_f[i][j] = d_x_double_prime[i][j];
                         d_x_prime[i][j] = d_x_double_prime[i][j];
                     }
                 }
 
                 // FFN Layer 2
-                let mut d_b2 = [0.0f32; 16];
-                let mut d_w2 = [[0.0f32; 16]; 32];
-                let mut d_h_act = [[0.0f32; 32]; 8];
-                for i in 0..t {
-                    for j in 0..d {
+                let mut d_b2 = [0.0f32; D];
+                let mut d_w2 = [[0.0f32; D]; D_FF];
+                let mut d_h_act = [[0.0f32; D_FF]; T];
+                for i in 0..T {
+                    for j in 0..D {
                         d_b2[j] += d_f[i][j];
-                        for m in 0..d_ff {
+                        for m in 0..D_FF {
                             d_w2[m][j] += cache.h_act[i][m] * d_f[i][j];
                             d_h_act[i][m] += d_f[i][j] * self.w2[m][j];
                         }
                     }
                 }
 
-                // FFN Layer 1 (ReLU)
-                let mut d_h_raw = [[0.0f32; 32]; 8];
-                for i in 0..t {
-                    for j in 0..d_ff {
+                // FFN Layer 1 (ReLU backward)
+                let mut d_h_raw = [[0.0f32; D_FF]; T];
+                for i in 0..T {
+                    for j in 0..D_FF {
                         if cache.h_raw[i][j] > 0.0 {
                             d_h_raw[i][j] = d_h_act[i][j];
                         }
                     }
                 }
 
-                // FFN Layer 1
-                let mut d_b1 = [0.0f32; 32];
-                let mut d_w1 = [[0.0f32; 32]; 16];
-                for i in 0..t {
-                    for j in 0..d_ff {
+                // FFN Layer 1 projection
+                let mut d_b1 = [0.0f32; D_FF];
+                let mut d_w1 = [[0.0f32; D_FF]; D];
+                for i in 0..T {
+                    for j in 0..D_FF {
                         d_b1[j] += d_h_raw[i][j];
-                        for m in 0..d {
+                        for m in 0..D {
                             d_w1[m][j] += cache.x_prime[i][m] * d_h_raw[i][j];
                             d_x_prime[i][m] += d_h_raw[i][j] * self.w1[m][j];
                         }
@@ -391,83 +415,132 @@ impl MiniTransformer {
                 }
 
                 // First residual connection
-                let mut d_o = [[0.0f32; 16]; 8];
-                let mut d_x_emb = [[0.0f32; 16]; 8];
-                for i in 0..t {
-                    for j in 0..d {
+                let mut d_o = [[0.0f32; D]; T];
+                let mut d_x_emb = [[0.0f32; D]; T];
+                for i in 0..T {
+                    for j in 0..D {
                         d_o[i][j] = d_x_prime[i][j];
                         d_x_emb[i][j] = d_x_prime[i][j];
                     }
                 }
 
-                // Attention output
-                let mut d_a = [[0.0f32; 8]; 8];
-                let mut d_v = [[0.0f32; 16]; 8];
-                for i in 0..t {
-                    for j in 0..d {
-                        for m in 0..t {
-                            d_a[i][m] += d_o[i][j] * cache.v[m][j];
-                            d_v[m][j] += d_o[i][j] * cache.a[i][m];
+                // === Multi-head attention backprop ===
+                // Split d_o into 2 heads
+                let mut d_o0 = [[0.0f32; HEAD_DIM]; T];
+                let mut d_o1 = [[0.0f32; HEAD_DIM]; T];
+                for i in 0..T {
+                    for j in 0..HEAD_DIM {
+                        d_o0[i][j] = d_o[i][j];
+                        d_o1[i][j] = d_o[i][HEAD_DIM + j];
+                    }
+                }
+
+                // Accumulated gradients across heads for Q, K, V projections
+                let mut d_q = [[0.0f32; D]; T];
+                let mut d_k = [[0.0f32; D]; T];
+                let mut d_v = [[0.0f32; D]; T];
+                let scale = 1.0 / (HEAD_DIM as f32).sqrt();
+
+                // Backprop through head 0
+                {
+                    // Attention output -> V grad
+                    let mut d_a0 = [[0.0f32; T]; T];
+                    for i in 0..T {
+                        for j in 0..HEAD_DIM {
+                            for m in 0..T {
+                                d_a0[i][m] += d_o0[i][j] * cache.v[m][j];
+                                d_v[m][j] += d_o0[i][j] * cache.a0[i][m];
+                            }
+                        }
+                    }
+
+                    // Softmax backward
+                    let mut d_s0 = [[0.0f32; T]; T];
+                    for i in 0..T {
+                        let mut sum_a_da = 0.0f32;
+                        for l in 0..T {
+                            sum_a_da += cache.a0[i][l] * d_a0[i][l];
+                        }
+                        for j in 0..T {
+                            d_s0[i][j] = cache.a0[i][j] * (d_a0[i][j] - sum_a_da);
+                        }
+                    }
+
+                    // Attention logits -> Q, K
+                    for i in 0..T {
+                        for j in 0..T {
+                            for m in 0..HEAD_DIM {
+                                d_q[i][m] += scale * d_s0[i][j] * cache.k[j][m];
+                                d_k[j][m] += scale * d_s0[i][j] * cache.q[i][m];
+                            }
                         }
                     }
                 }
 
-                // Softmax
-                let mut d_s = [[0.0f32; 8]; 8];
-                for i in 0..t {
-                    let mut sum_a_da = 0.0f32;
-                    for l in 0..t {
-                        sum_a_da += cache.a[i][l] * d_a[i][l];
+                // Backprop through head 1
+                {
+                    let mut d_a1 = [[0.0f32; T]; T];
+                    for i in 0..T {
+                        for j in 0..HEAD_DIM {
+                            for m in 0..T {
+                                d_a1[i][m] += d_o1[i][j] * cache.v[m][HEAD_DIM + j];
+                                d_v[m][HEAD_DIM + j] += d_o1[i][j] * cache.a1[i][m];
+                            }
+                        }
                     }
-                    for j in 0..t {
-                        d_s[i][j] = cache.a[i][j] * (d_a[i][j] - sum_a_da);
-                    }
-                }
 
-                // Attention logits
-                let scale = 1.0 / (d as f32).sqrt();
-                let mut d_q = [[0.0f32; 16]; 8];
-                let mut d_k = [[0.0f32; 16]; 8];
-                for i in 0..t {
-                    for j in 0..t {
-                        for m in 0..d {
-                            d_q[i][m] += scale * d_s[i][j] * cache.k[j][m];
-                            d_k[j][m] += scale * d_s[i][j] * cache.q[i][m];
+                    let mut d_s1 = [[0.0f32; T]; T];
+                    for i in 0..T {
+                        let mut sum_a_da = 0.0f32;
+                        for l in 0..T {
+                            sum_a_da += cache.a1[i][l] * d_a1[i][l];
+                        }
+                        for j in 0..T {
+                            d_s1[i][j] = cache.a1[i][j] * (d_a1[i][j] - sum_a_da);
+                        }
+                    }
+
+                    for i in 0..T {
+                        for j in 0..T {
+                            for m in 0..HEAD_DIM {
+                                d_q[i][HEAD_DIM + m] += scale * d_s1[i][j] * cache.k[j][HEAD_DIM + m];
+                                d_k[j][HEAD_DIM + m] += scale * d_s1[i][j] * cache.q[i][HEAD_DIM + m];
+                            }
                         }
                     }
                 }
 
-                // Q, K, V Projections
-                let mut d_b_q = [0.0f32; 16];
-                let mut d_w_q = [[0.0f32; 16]; 16];
-                for i in 0..t {
-                    for j in 0..d {
+                // Q, K, V Projections backprop
+                let mut d_b_q = [0.0f32; D];
+                let mut d_w_q = [[0.0f32; D]; D];
+                for i in 0..T {
+                    for j in 0..D {
                         d_b_q[j] += d_q[i][j];
-                        for m in 0..d {
+                        for m in 0..D {
                             d_w_q[m][j] += cache.x_emb[i][m] * d_q[i][j];
                             d_x_emb[i][m] += d_q[i][j] * self.w_q[m][j];
                         }
                     }
                 }
 
-                let mut d_b_k = [0.0f32; 16];
-                let mut d_w_k = [[0.0f32; 16]; 16];
-                for i in 0..t {
-                    for j in 0..d {
+                let mut d_b_k = [0.0f32; D];
+                let mut d_w_k = [[0.0f32; D]; D];
+                for i in 0..T {
+                    for j in 0..D {
                         d_b_k[j] += d_k[i][j];
-                        for m in 0..d {
+                        for m in 0..D {
                             d_w_k[m][j] += cache.x_emb[i][m] * d_k[i][j];
                             d_x_emb[i][m] += d_k[i][j] * self.w_k[m][j];
                         }
                     }
                 }
 
-                let mut d_b_v = [0.0f32; 16];
-                let mut d_w_v = [[0.0f32; 16]; 16];
-                for i in 0..t {
-                    for j in 0..d {
+                let mut d_b_v = [0.0f32; D];
+                let mut d_w_v = [[0.0f32; D]; D];
+                for i in 0..T {
+                    for j in 0..D {
                         d_b_v[j] += d_v[i][j];
-                        for m in 0..d {
+                        for m in 0..D {
                             d_w_v[m][j] += cache.x_emb[i][m] * d_v[i][j];
                             d_x_emb[i][m] += d_v[i][j] * self.w_v[m][j];
                         }
@@ -475,32 +548,32 @@ impl MiniTransformer {
                 }
 
                 // Embedding layer
-                let mut d_w_emb = [[0.0f32; 16]; 8];
-                let mut d_e_pos = [[0.0f32; 16]; 8];
-                for i in 0..t {
-                    for j in 0..d {
+                let mut d_w_emb = [[0.0f32; D]; T];
+                let mut d_e_pos = [[0.0f32; D]; T];
+                for i in 0..T {
+                    for j in 0..D {
                         d_e_pos[i][j] = d_x_emb[i][j];
                         d_w_emb[i][j] = d_x_emb[i][j] * x[i];
                     }
                 }
 
-                // Update weights and biases
-                for i in 0..t {
-                    for j in 0..d {
+                // Update weights and biases with SGD + momentum + weight decay
+                for i in 0..T {
+                    for j in 0..D {
                         let grad = d_w_emb[i][j] + weight_decay * self.w_emb[i][j];
                         v_w_emb[i][j] = momentum * v_w_emb[i][j] + grad;
                         self.w_emb[i][j] -= lr * v_w_emb[i][j];
                     }
                 }
-                for i in 0..t {
-                    for j in 0..d {
+                for i in 0..T {
+                    for j in 0..D {
                         let grad = d_e_pos[i][j] + weight_decay * self.e_pos[i][j];
                         v_e_pos[i][j] = momentum * v_e_pos[i][j] + grad;
                         self.e_pos[i][j] -= lr * v_e_pos[i][j];
                     }
                 }
-                for i in 0..d {
-                    for j in 0..d {
+                for i in 0..D {
+                    for j in 0..D {
                         let grad = d_w_q[i][j] + weight_decay * self.w_q[i][j];
                         v_w_q[i][j] = momentum * v_w_q[i][j] + grad;
                         self.w_q[i][j] -= lr * v_w_q[i][j];
@@ -509,8 +582,8 @@ impl MiniTransformer {
                     v_b_q[i] = momentum * v_b_q[i] + grad;
                     self.b_q[i] -= lr * v_b_q[i];
                 }
-                for i in 0..d {
-                    for j in 0..d {
+                for i in 0..D {
+                    for j in 0..D {
                         let grad = d_w_k[i][j] + weight_decay * self.w_k[i][j];
                         v_w_k[i][j] = momentum * v_w_k[i][j] + grad;
                         self.w_k[i][j] -= lr * v_w_k[i][j];
@@ -519,8 +592,8 @@ impl MiniTransformer {
                     v_b_k[i] = momentum * v_b_k[i] + grad;
                     self.b_k[i] -= lr * v_b_k[i];
                 }
-                for i in 0..d {
-                    for j in 0..d {
+                for i in 0..D {
+                    for j in 0..D {
                         let grad = d_w_v[i][j] + weight_decay * self.w_v[i][j];
                         v_w_v[i][j] = momentum * v_w_v[i][j] + grad;
                         self.w_v[i][j] -= lr * v_w_v[i][j];
@@ -529,31 +602,31 @@ impl MiniTransformer {
                     v_b_v[i] = momentum * v_b_v[i] + grad;
                     self.b_v[i] -= lr * v_b_v[i];
                 }
-                for i in 0..d {
-                    for j in 0..d_ff {
+                for i in 0..D {
+                    for j in 0..D_FF {
                         let grad = d_w1[i][j] + weight_decay * self.w1[i][j];
                         v_w1[i][j] = momentum * v_w1[i][j] + grad;
                         self.w1[i][j] -= lr * v_w1[i][j];
                     }
                 }
-                for j in 0..d_ff {
+                for j in 0..D_FF {
                     let grad = d_b1[j];
                     v_b1[j] = momentum * v_b1[j] + grad;
                     self.b1[j] -= lr * v_b1[j];
                 }
-                for i in 0..d_ff {
-                    for j in 0..d {
+                for i in 0..D_FF {
+                    for j in 0..D {
                         let grad = d_w2[i][j] + weight_decay * self.w2[i][j];
                         v_w2[i][j] = momentum * v_w2[i][j] + grad;
                         self.w2[i][j] -= lr * v_w2[i][j];
                     }
                 }
-                for j in 0..d {
+                for j in 0..D {
                     let grad = d_b2[j];
                     v_b2[j] = momentum * v_b2[j] + grad;
                     self.b2[j] -= lr * v_b2[j];
                 }
-                for j in 0..d {
+                for j in 0..D {
                     let grad = d_w_out[j] + weight_decay * self.w_out[j];
                     v_w_out[j] = momentum * v_w_out[j] + grad;
                     self.w_out[j] -= lr * v_w_out[j];
@@ -571,7 +644,7 @@ impl MiniTransformer {
     }
 
     /// Evaluate the model's classification accuracy on a dataset.
-    pub fn validate(&self, dataset: &[([f32; 8], f32)]) -> f32 {
+    pub fn validate(&self, dataset: &[([f32; T], f32)]) -> f32 {
         if dataset.is_empty() {
             return 0.0;
         }
@@ -606,57 +679,95 @@ impl MiniTransformer {
     }
 
     /// Generates synthetic training data for humans and bots.
-    pub fn generate_synthetic_dataset() -> Vec<([f32; 8], f32)> {
+    /// Includes adversarial bot samples that try to mimic human movement patterns.
+    pub fn generate_synthetic_dataset() -> Vec<([f32; T], f32)> {
         let mut rng = rand::thread_rng();
         let mut dataset = Vec::new();
 
-        // 1. Generate Bot Features - Group A: Linear bots (target = 0.0)
-        for _ in 0..500 {
-            let straightness = rng.gen_range(0.98..1.0);
-            let avg_speed = rng.gen_range(0.3..0.9);
-            let speed_var = rng.gen_range(0.0..0.02);
-            let angular_jitter = rng.gen_range(0.0..0.01);
-            let total_duration = rng.gen_range(0.05..0.2);
-            let line_deviation = rng.gen_range(0.0..0.01);
-            let point_count = rng.gen_range(0.1..0.4);
-            let entropy = rng.gen_range(0.0..0.05);
-
+        // 1. Generate Bot Features - Group A: Naive linear bots (target = 0.0)
+        for _ in 0..400 {
             dataset.push(([
-                straightness,
-                avg_speed,
-                speed_var,
-                angular_jitter,
-                total_duration,
-                line_deviation,
-                point_count,
-                entropy,
+                rng.gen_range(0.98..1.0),
+                rng.gen_range(0.3..0.9),
+                rng.gen_range(0.0..0.02),
+                rng.gen_range(0.0..0.01),
+                rng.gen_range(0.05..0.2),
+                rng.gen_range(0.0..0.01),
+                rng.gen_range(0.1..0.4),
+                rng.gen_range(0.0..0.05),
+                rng.gen_range(0.0..0.03),
+                rng.gen_range(0.0..0.01),
+                rng.gen_range(0.0..0.01),
+                rng.gen_range(0.0..0.02),
+                rng.gen_range(0.0..0.05),
             ], 0.0));
         }
 
         // 2. Generate Bot Features - Group B: Bezier / Curve bots (target = 0.0)
-        for _ in 0..500 {
-            let straightness = rng.gen_range(0.7..0.95);
-            let avg_speed = rng.gen_range(0.2..0.7);
-            let speed_var = rng.gen_range(0.02..0.35);
-            let angular_jitter = rng.gen_range(0.0..0.03);
-            let total_duration = rng.gen_range(0.1..0.5);
-            let line_deviation = rng.gen_range(0.02..0.15);
-            let point_count = rng.gen_range(0.15..0.6);
-            let entropy = rng.gen_range(0.0..0.08);
-
+        for _ in 0..400 {
             dataset.push(([
-                straightness,
-                avg_speed,
-                speed_var,
-                angular_jitter,
-                total_duration,
-                line_deviation,
-                point_count,
-                entropy,
+                rng.gen_range(0.7..0.95),
+                rng.gen_range(0.2..0.7),
+                rng.gen_range(0.02..0.35),
+                rng.gen_range(0.0..0.03),
+                rng.gen_range(0.1..0.5),
+                rng.gen_range(0.02..0.15),
+                rng.gen_range(0.15..0.6),
+                rng.gen_range(0.0..0.08),
+                rng.gen_range(0.01..0.2),
+                rng.gen_range(0.0..0.03),
+                rng.gen_range(0.0..0.02),
+                rng.gen_range(0.0..0.04),
+                rng.gen_range(0.0..0.08),
             ], 0.0));
         }
 
-        // 3. Generate Human Features (target = 1.0)
+        // 3. Generate Bot Features - Group C: Adversarial bots mimicking humans (target = 0.0)
+        // These bots add human-like noise, jitter, and speed variance to evade simple detection.
+        for _ in 0..600 {
+            let straightness = rng.gen_range(0.5..0.94);
+            let avg_speed = rng.gen_range(0.1..0.6);
+            let speed_var = rng.gen_range(0.08..0.5);
+            let angular_jitter = rng.gen_range(0.02..0.2);
+            let total_duration = rng.gen_range(0.15..0.7);
+            let line_deviation = rng.gen_range(0.01..0.15);
+            let point_count = rng.gen_range(0.2..0.7);
+            let entropy = rng.gen_range(0.05..0.3);
+            // Adversarial bots have lower accel variance and timing jitter
+            let accel_var = rng.gen_range(0.02..0.2);
+            let curvature_change = rng.gen_range(0.01..0.08);
+            let overshoot = rng.gen_range(0.0..0.02);
+            let dwell_ratio = rng.gen_range(0.01..0.06);
+            let timing_jitter = rng.gen_range(0.02..0.1);
+
+            dataset.push(([
+                straightness, avg_speed, speed_var, angular_jitter,
+                total_duration, line_deviation, point_count, entropy,
+                accel_var, curvature_change, overshoot, dwell_ratio, timing_jitter,
+            ], 0.0));
+        }
+
+        // 4. Generate Bot Features - Group D: Replay/segmented bots (target = 0.0)
+        // Bots that replay recorded human paths but with robotic timing.
+        for _ in 0..200 {
+            dataset.push(([
+                rng.gen_range(0.6..0.96),
+                rng.gen_range(0.2..0.7),
+                rng.gen_range(0.05..0.3),
+                rng.gen_range(0.02..0.15),
+                rng.gen_range(0.1..0.6),
+                rng.gen_range(0.01..0.12),
+                rng.gen_range(0.2..0.6),
+                rng.gen_range(0.05..0.25),
+                rng.gen_range(0.01..0.08),  // low accel variance
+                rng.gen_range(0.01..0.06),
+                rng.gen_range(0.0..0.01),
+                rng.gen_range(0.0..0.03),   // low dwell
+                rng.gen_range(0.01..0.06),  // low timing jitter
+            ], 0.0));
+        }
+
+        // 5. Generate Human Features (target = 1.0)
         for _ in 0..1000 {
             let straightness = rng.gen_range(0.5..0.92);
             let avg_speed = rng.gen_range(0.1..0.6);
@@ -666,20 +777,22 @@ impl MiniTransformer {
             let line_deviation = rng.gen_range(0.02..0.2);
             let point_count = rng.gen_range(0.2..0.8);
             let entropy = rng.gen_range(0.15..0.65);
+            // Human features show higher acceleration variance, curvature changes,
+            // more overshoot, more dwell time, and higher timing jitter
+            let accel_var = rng.gen_range(0.08..0.6);
+            let curvature_change = rng.gen_range(0.03..0.3);
+            let overshoot = rng.gen_range(0.0..0.15);
+            let dwell_ratio = rng.gen_range(0.02..0.25);
+            let timing_jitter = rng.gen_range(0.05..0.5);
 
             dataset.push(([
-                straightness,
-                avg_speed,
-                speed_var,
-                angular_jitter,
-                total_duration,
-                line_deviation,
-                point_count,
-                entropy,
+                straightness, avg_speed, speed_var, angular_jitter,
+                total_duration, line_deviation, point_count, entropy,
+                accel_var, curvature_change, overshoot, dwell_ratio, timing_jitter,
             ], 1.0));
         }
 
-        // 4. Generate Human Slider Drag Features (target = 1.0)
+        // 6. Generate Human Slider Drag Features (target = 1.0)
         for _ in 0..500 {
             let straightness = rng.gen_range(0.96..0.998);
             let avg_speed = rng.gen_range(0.15..0.6);
@@ -689,16 +802,17 @@ impl MiniTransformer {
             let line_deviation = rng.gen_range(0.002..0.02);
             let point_count = rng.gen_range(0.25..0.7);
             let entropy = rng.gen_range(0.03..0.2);
+            // Slider drags have moderate accel variance, smooth curvature, some overshoot
+            let accel_var = rng.gen_range(0.06..0.4);
+            let curvature_change = rng.gen_range(0.01..0.1);
+            let overshoot = rng.gen_range(0.0..0.08);
+            let dwell_ratio = rng.gen_range(0.01..0.08);
+            let timing_jitter = rng.gen_range(0.03..0.2);
 
             dataset.push(([
-                straightness,
-                avg_speed,
-                speed_var,
-                angular_jitter,
-                total_duration,
-                line_deviation,
-                point_count,
-                entropy,
+                straightness, avg_speed, speed_var, angular_jitter,
+                total_duration, line_deviation, point_count, entropy,
+                accel_var, curvature_change, overshoot, dwell_ratio, timing_jitter,
             ], 1.0));
         }
 

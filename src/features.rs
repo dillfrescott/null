@@ -17,10 +17,15 @@ pub struct FeatureVector {
     pub line_deviation: f32,     // Avg perpendicular distance to direct line
     pub point_count: f32,        // Number of points, normalized
     pub entropy: f32,            // Entropy of direction changes
+    pub accel_var: f32,          // Variance of acceleration (jerkiness)
+    pub curvature_change: f32,   // Mean absolute change in turning angles
+    pub overshoot: f32,          // Max distance beyond endpoint / straight_dist
+    pub dwell_ratio: f32,        // Fraction of time spent near-zero speed
+    pub timing_jitter: f32,      // Std dev of inter-sample intervals / mean interval
 }
 
 impl FeatureVector {
-    pub fn to_array(&self) -> [f32; 8] {
+    pub fn to_array(&self) -> [f32; 13] {
         [
             self.straightness,
             self.avg_speed,
@@ -30,6 +35,11 @@ impl FeatureVector {
             self.line_deviation,
             self.point_count,
             self.entropy,
+            self.accel_var,
+            self.curvature_change,
+            self.overshoot,
+            self.dwell_ratio,
+            self.timing_jitter,
         ]
     }
 }
@@ -103,6 +113,11 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
             line_deviation: 0.0,
             point_count: (n as f32 / 50.0).min(1.0),
             entropy: 0.0,
+            accel_var: 0.0,
+            curvature_change: 0.0,
+            overshoot: 0.0,
+            dwell_ratio: 0.0,
+            timing_jitter: 0.0,
         });
     }
 
@@ -204,6 +219,107 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
         0.0
     };
 
+    // 7. Acceleration variance (measures jerkiness of movement)
+    let mut accels = Vec::with_capacity(speeds.len().saturating_sub(1));
+    for i in 0..speeds.len().saturating_sub(1) {
+        accels.push(speeds[i + 1] - speeds[i]);
+    }
+    let accel_var = if !accels.is_empty() {
+        let mean_accel = accels.iter().sum::<f32>() / accels.len() as f32;
+        let variance = accels.iter()
+            .map(|&a| { let d = a - mean_accel; d * d })
+            .sum::<f32>() / accels.len() as f32;
+        (variance.sqrt() / (avg_speed.max(0.001))).min(3.0) // normalize by speed
+    } else {
+        0.0
+    };
+
+    // 8. Curvature change: mean absolute change in turning angles between consecutive triples
+    let mut curvature_change = 0.0f32;
+    if angles.len() >= 3 {
+        let mut turn_diffs = Vec::new();
+        for i in 0..(angles.len() - 2) {
+            let turn1 = angles[i + 1] - angles[i];
+            let turn2 = angles[i + 2] - angles[i + 1];
+            let mut diff = turn2 - turn1;
+            while diff > std::f32::consts::PI {
+                diff -= 2.0 * std::f32::consts::PI;
+            }
+            while diff < -std::f32::consts::PI {
+                diff += 2.0 * std::f32::consts::PI;
+            }
+            turn_diffs.push(diff.abs());
+        }
+        curvature_change = turn_diffs.iter().sum::<f32>() / turn_diffs.len() as f32;
+    }
+    // Normalize curvature change by PI
+    let curvature_change = (curvature_change / std::f32::consts::PI).min(1.0);
+
+    // 9. Overshoot distance: how far past the endpoint the path extends
+    let overshoot = if straight_dist > 0.0 {
+        let dx_unit = dx_total / straight_dist;
+        let dy_unit = dy_total / straight_dist;
+        let mut max_proj = 0.0f32;
+        for p in &unique_points {
+            let proj = (p.x - start_p.x) * dx_unit + (p.y - start_p.y) * dy_unit;
+            if proj > straight_dist {
+                let past = proj - straight_dist;
+                if past > max_proj {
+                    max_proj = past;
+                }
+            }
+        }
+        (max_proj / straight_dist).min(1.0)
+    } else {
+        0.0
+    };
+
+    // 10. Dwell ratio: fraction of time where speed is near zero
+    let dwell_ratio = if !speeds.is_empty() && avg_speed > 0.0 {
+        let slow_threshold = avg_speed * 0.15;
+        let mut dwell_time = 0.0f32;
+        let mut total_time = 0.0f32;
+        for i in 0..speeds.len() {
+            let dt = (unique_points[i + 1].t - unique_points[i].t) as f32;
+            if dt > 0.0 {
+                total_time += dt;
+                if speeds[i] < slow_threshold {
+                    dwell_time += dt;
+                }
+            }
+        }
+        if total_time > 0.0 {
+            (dwell_time / total_time).min(1.0)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
+    // 11. Timing jitter: std dev of inter-sample intervals relative to mean
+    let timing_jitter = if n >= 3 {
+        let mut intervals = Vec::new();
+        for i in 0..(n - 1) {
+            let dt = (unique_points[i + 1].t - unique_points[i].t) as f32;
+            if dt > 0.0 {
+                intervals.push(dt);
+            }
+        }
+        if intervals.len() >= 2 {
+            let mean_interval = intervals.iter().sum::<f32>() / intervals.len() as f32;
+            let variance = intervals.iter()
+                .map(|&dt| { let d = dt - mean_interval; d * d })
+                .sum::<f32>() / intervals.len() as f32;
+            let std_dev = variance.sqrt();
+            (std_dev / mean_interval.max(0.001)).min(2.0)
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+
     Some(FeatureVector {
         straightness,
         avg_speed: (avg_speed / 5.0).min(1.0), // normalize: speed of 5px/ms is very fast
@@ -213,5 +329,10 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
         line_deviation,
         point_count: (n as f32 / 50.0).min(1.0),                         // normalize relative to 50 points
         entropy,
+        accel_var,
+        curvature_change,
+        overshoot,
+        dwell_ratio,
+        timing_jitter,
     })
 }

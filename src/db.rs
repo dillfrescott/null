@@ -84,7 +84,7 @@ pub fn save_model(conn: &Connection, model: &MiniTransformer) -> Result<(), Stri
         .as_secs() as i64;
 
     conn.execute(
-        "INSERT OR REPLACE INTO model_weights (key, value, updated_at) VALUES ('current_model_v3_transformer', ?1, ?2)",
+        "INSERT OR REPLACE INTO model_weights (key, value, updated_at) VALUES ('current_model_v4_transformer', ?1, ?2)",
         params![serialized, now],
     ).map_err(|e| format!("Database save error: {}", e))?;
 
@@ -94,7 +94,7 @@ pub fn save_model(conn: &Connection, model: &MiniTransformer) -> Result<(), Stri
 /// Load model weights from the database, if they exist
 pub fn load_model(conn: &Connection) -> Result<Option<MiniTransformer>, String> {
     let mut stmt = conn
-        .prepare("SELECT value FROM model_weights WHERE key = 'current_model_v3_transformer'")
+        .prepare("SELECT value FROM model_weights WHERE key = 'current_model_v4_transformer'")
         .map_err(|e| format!("Prepare statement failed: {}", e))?;
 
     let mut rows = stmt
@@ -222,7 +222,7 @@ pub fn prune_old_tokens(conn: &Connection, max_age_secs: u64) -> Result<usize, S
 }
 
 /// Get the most recent telemetry logs from the database to use as training data.
-pub fn get_recent_telemetry(conn: &Connection, limit: usize) -> Result<Vec<([f32; 8], f32)>, String> {
+pub fn get_recent_telemetry(conn: &Connection, limit: usize) -> Result<Vec<([f32; 13], f32)>, String> {
     let mut stmt = conn
         .prepare("SELECT features_json, is_human FROM telemetry_logs WHERE is_high_confidence = 1 ORDER BY id DESC LIMIT ?1")
         .map_err(|e| format!("Prepare query failed: {}", e))?;
@@ -263,6 +263,11 @@ mod tests {
             line_deviation: 0.05,
             point_count: 0.6,
             entropy: 0.3,
+            accel_var: 0.2,
+            curvature_change: 0.1,
+            overshoot: 0.02,
+            dwell_ratio: 0.05,
+            timing_jitter: 0.1,
         };
         let features_json = serde_json::to_string(&features).unwrap();
 

@@ -6,6 +6,7 @@ use axum::{
     extract::ConnectInfo,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
@@ -38,6 +39,44 @@ struct LogMessage {
     is_high_confidence: bool,
 }
 
+/// Simple in-memory rate limiter: per-IP sliding window tracker
+struct RateLimiter {
+    buckets: HashMap<String, Vec<u64>>,
+    max_requests: usize,
+    window_secs: u64,
+}
+
+impl RateLimiter {
+    fn new(max_requests: usize, window_secs: u64) -> Self {
+        RateLimiter {
+            buckets: HashMap::new(),
+            max_requests,
+            window_secs,
+        }
+    }
+
+    fn check_and_record(&mut self, ip: &str, now_secs: u64) -> bool {
+        let cutoff = now_secs.saturating_sub(self.window_secs);
+        let timestamps = self.buckets.entry(ip.to_string()).or_insert_with(Vec::new);
+        // Remove expired timestamps
+        timestamps.retain(|&t| t > cutoff);
+        if timestamps.len() >= self.max_requests {
+            false
+        } else {
+            timestamps.push(now_secs);
+            true
+        }
+    }
+
+    fn remove_expired(&mut self, now_secs: u64) {
+        let cutoff = now_secs.saturating_sub(self.window_secs);
+        self.buckets.retain(|_, timestamps| {
+            timestamps.retain(|&t| t > cutoff);
+            !timestamps.is_empty()
+        });
+    }
+}
+
 /// Application state containing neural network, database connection, and security configurations
 struct AppState {
     model: Arc<std::sync::RwLock<model::MiniTransformer>>,
@@ -47,6 +86,7 @@ struct AppState {
     cache: cache::MemoryCache,
     log_tx: tokio::sync::mpsc::Sender<LogMessage>,
     expected_host: Option<String>,
+    rate_limiter: std::sync::Mutex<RateLimiter>,
 }
 
 #[derive(Deserialize)]
@@ -333,6 +373,7 @@ async fn main() {
         cache,
         log_tx,
         expected_host,
+        rate_limiter: std::sync::Mutex::new(RateLimiter::new(30, 60)),
     });
 
     // 4. Setup router with CORS and host restriction middleware
@@ -530,11 +571,41 @@ async fn verify_handler(
         }
     }
 
-    // 4. Verify Proof of Work
+    // 4. Rate limiting: per-IP sliding window (30 requests per 60 seconds)
+    let ip_str = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok().map(|s| s.split(',').next().unwrap_or("").trim().to_string()))
+        .unwrap_or_else(|| addr.ip().to_string());
+    {
+        let mut limiter = state.rate_limiter.lock().unwrap();
+        if !limiter.check_and_record(&ip_str, now) {
+            warn!("Rate limit exceeded for IP: {}", ip_str);
+            return Json(VerifyResponse {
+                error: Some("Too many requests. Please slow down.".to_string()),
+                ..Default::default()
+            });
+        }
+        // Periodically clean up stale entries (every ~10 requests as a simple heuristic)
+        if limiter.buckets.len() > 1000 {
+            limiter.remove_expired(now);
+        }
+    }
+
+    // 5. Verify Proof of Work
     if !verify_pow(&payload.salt, payload.nonce, payload.difficulty) {
         warn!("Verification PoW mismatch! salt: {}, nonce: {}, diff: {}", payload.salt, payload.nonce, payload.difficulty);
         return Json(VerifyResponse {
             error: Some("Invalid Proof of Work solution.".to_string()),
+            ..Default::default()
+        });
+    }
+
+    // 6. PoW minimum time validation: check that the nonce wasn't found too quickly
+    //    (pre-baked or instantly computed). Minimum 1 second of real wall time required.
+    if now.saturating_sub(payload.timestamp) < 1 {
+        warn!("PoW solved too quickly ({}s), possible pre-computed nonce", now.saturating_sub(payload.timestamp));
+        return Json(VerifyResponse {
+            error: Some("Proof of Work must take real computation time.".to_string()),
             ..Default::default()
         });
     }
@@ -980,6 +1051,7 @@ mod tests {
             cache: cache::MemoryCache::new(),
             log_tx,
             expected_host: Some("null.dill.moe".to_string()),
+            rate_limiter: std::sync::Mutex::new(RateLimiter::new(100, 60)),
         })
     }
 
