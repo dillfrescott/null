@@ -40,7 +40,7 @@ struct LogMessage {
 
 /// Application state containing neural network, database connection, and security configurations
 struct AppState {
-    model: Arc<std::sync::RwLock<model::MLP>>,
+    model: Arc<std::sync::RwLock<model::MiniTransformer>>,
     _db_conn: std::sync::Mutex<rusqlite::Connection>,
     secret_key: Vec<u8>,
     min_score: f32,
@@ -145,7 +145,7 @@ async fn main() {
         }
         _ => {
             info!("No saved weights found. Training neural network from synthetic data...");
-            let new_model = model::MLP::new_default();
+            let new_model = model::MiniTransformer::new_default();
             if let Err(e) = db::save_model(&db_conn, &new_model) {
                 warn!("Failed to save trained neural network to database: {}", e);
             } else {
@@ -154,7 +154,7 @@ async fn main() {
             new_model
         }
     };
-    info!("Neural Network model ready. (Input: 8, Hidden1: 12, Hidden2: 8, Output: 1)");
+    info!("Mini Transformer model ready. (Input: 8 features, Embedding: 16, FF: 32, Heads: 1, Output: 1)");
 
     let model = Arc::new(std::sync::RwLock::new(raw_model));
 
@@ -229,7 +229,7 @@ async fn main() {
                             info!("Fetched {} recent telemetry samples from database.", recent_data.len());
 
                             // Generate synthetic dataset
-                            let mut synthetic_data = model::MLP::generate_synthetic_dataset();
+                            let mut synthetic_data = model::MiniTransformer::generate_synthetic_dataset();
 
                             // Shuffle synthetic dataset and split it
                             use rand::seq::SliceRandom;
@@ -969,7 +969,7 @@ mod tests {
     use tower::ServiceExt;
 
     fn create_test_state() -> Arc<AppState> {
-        let model = Arc::new(std::sync::RwLock::new(model::MLP::new_default()));
+        let model = Arc::new(std::sync::RwLock::new(model::MiniTransformer::new_default()));
         let db_conn = db::init_db(":memory:").unwrap();
         let (log_tx, _) = tokio::sync::mpsc::channel(1);
         Arc::new(AppState {

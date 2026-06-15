@@ -1,5 +1,5 @@
 use rusqlite::{params, Connection, Result};
-use crate::model::MLP;
+use crate::model::MiniTransformer;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn init_db(db_path: &str) -> Result<Connection> {
@@ -74,7 +74,7 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
 }
 
 /// Save the current model weights and biases to the database
-pub fn save_model(conn: &Connection, model: &MLP) -> Result<(), String> {
+pub fn save_model(conn: &Connection, model: &MiniTransformer) -> Result<(), String> {
     let serialized = serde_json::to_string(model)
         .map_err(|e| format!("Failed to serialize model: {}", e))?;
     
@@ -84,7 +84,7 @@ pub fn save_model(conn: &Connection, model: &MLP) -> Result<(), String> {
         .as_secs() as i64;
 
     conn.execute(
-        "INSERT OR REPLACE INTO model_weights (key, value, updated_at) VALUES ('current_model_v2', ?1, ?2)",
+        "INSERT OR REPLACE INTO model_weights (key, value, updated_at) VALUES ('current_model_v3_transformer', ?1, ?2)",
         params![serialized, now],
     ).map_err(|e| format!("Database save error: {}", e))?;
 
@@ -92,9 +92,9 @@ pub fn save_model(conn: &Connection, model: &MLP) -> Result<(), String> {
 }
 
 /// Load model weights from the database, if they exist
-pub fn load_model(conn: &Connection) -> Result<Option<MLP>, String> {
+pub fn load_model(conn: &Connection) -> Result<Option<MiniTransformer>, String> {
     let mut stmt = conn
-        .prepare("SELECT value FROM model_weights WHERE key = 'current_model_v2'")
+        .prepare("SELECT value FROM model_weights WHERE key = 'current_model_v3_transformer'")
         .map_err(|e| format!("Prepare statement failed: {}", e))?;
 
     let mut rows = stmt
@@ -103,7 +103,7 @@ pub fn load_model(conn: &Connection) -> Result<Option<MLP>, String> {
 
     if let Some(row) = rows.next().map_err(|e| format!("Row fetching failed: {}", e))? {
         let val: String = row.get(0).map_err(|e| format!("Get column failed: {}", e))?;
-        let model: MLP = serde_json::from_str(&val)
+        let model: MiniTransformer = serde_json::from_str(&val)
             .map_err(|e| format!("Failed to deserialize model: {}", e))?;
         Ok(Some(model))
     } else {
