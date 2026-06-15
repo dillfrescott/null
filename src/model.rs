@@ -111,6 +111,17 @@ impl MLP {
         let mut rng = rand::thread_rng();
         let mut shuffled_dataset = dataset.to_vec();
 
+        // Initialize momentum velocities
+        let mut v_w1 = vec![vec![0.0f32; 8]; 12];
+        let mut v_b1 = vec![0.0f32; 12];
+        let mut v_w2 = vec![vec![0.0f32; 12]; 8];
+        let mut v_b2 = vec![0.0f32; 8];
+        let mut v_w3 = vec![0.0f32; 8];
+        let mut v_b3 = 0.0f32;
+
+        let momentum = 0.9f32;
+        let weight_decay = 0.0001f32; // L2 regularization coefficient
+
         for _epoch in 0..epochs {
             shuffled_dataset.shuffle(&mut rng);
             total_loss = 0.0;
@@ -142,27 +153,41 @@ impl MLP {
                     d_h1[j] = sum * Self::d_relu(h1_raw[j]);
                 }
 
-                // Update weights and biases (Gradient Descent)
+                // Update weights and biases (Gradient Descent with Momentum & Weight Decay)
                 // Layer 3
                 for j in 0..8 {
-                    self.w3[j] -= lr * d_out * h2_act[j];
+                    let grad = d_out * h2_act[j] + weight_decay * self.w3[j];
+                    v_w3[j] = momentum * v_w3[j] + grad;
+                    self.w3[j] -= lr * v_w3[j];
                 }
-                self.b3 -= lr * d_out;
+                {
+                    let grad = d_out;
+                    v_b3 = momentum * v_b3 + grad;
+                    self.b3 -= lr * v_b3;
+                }
 
                 // Layer 2
                 for i in 0..8 {
                     for j in 0..12 {
-                        self.w2[i][j] -= lr * d_h2[i] * h1_act[j];
+                        let grad = d_h2[i] * h1_act[j] + weight_decay * self.w2[i][j];
+                        v_w2[i][j] = momentum * v_w2[i][j] + grad;
+                        self.w2[i][j] -= lr * v_w2[i][j];
                     }
-                    self.b2[i] -= lr * d_h2[i];
+                    let grad = d_h2[i];
+                    v_b2[i] = momentum * v_b2[i] + grad;
+                    self.b2[i] -= lr * v_b2[i];
                 }
 
                 // Layer 1
                 for i in 0..12 {
                     for j in 0..8 {
-                        self.w1[i][j] -= lr * d_h1[i] * x[j];
+                        let grad = d_h1[i] * x[j] + weight_decay * self.w1[i][j];
+                        v_w1[i][j] = momentum * v_w1[i][j] + grad;
+                        self.w1[i][j] -= lr * v_w1[i][j];
                     }
-                    self.b1[i] -= lr * d_h1[i];
+                    let grad = d_h1[i];
+                    v_b1[i] = momentum * v_b1[i] + grad;
+                    self.b1[i] -= lr * v_b1[i];
                 }
             }
             total_loss /= dataset.len() as f32;

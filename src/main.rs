@@ -198,7 +198,7 @@ async fn main() {
 
             let mut last_prune = std::time::Instant::now();
             let mut logged_interactions_count = 0;
-            
+
             while let Some(msg) = log_rx.recv().await {
                 let _ = db::log_telemetry(
                     &conn,
@@ -221,44 +221,49 @@ async fn main() {
                 // Periodically retrain and adapt the model (every 10 new logged interactions)
                 if logged_interactions_count >= 10 {
                     info!("Adapting neural network: retraining model on recent telemetry logs + synthetic dataset...");
-                    
+
                     // Fetch recent logs
                     match db::get_recent_telemetry(&conn, 500) {
                         Ok(mut recent_data) => {
                             info!("Fetched {} recent telemetry samples from database.", recent_data.len());
-                            
-                            // Generate synthetic dataset to avoid overfitting/catastrophic forgetting
-                            let mut dataset = model::MLP::generate_synthetic_dataset();
-                            
-                            // Combine them
-                            dataset.append(&mut recent_data);
-                            
-                            // Shuffle and split into train (90%) and validation (10%) datasets
+
+                            // Generate synthetic dataset
+                            let mut synthetic_data = model::MLP::generate_synthetic_dataset();
+
+                            // Shuffle synthetic dataset and split it
                             use rand::seq::SliceRandom;
                             let mut rng = rand::thread_rng();
-                            dataset.shuffle(&mut rng);
-                            let val_size = dataset.len() / 10;
-                            let val_dataset = dataset[0..val_size].to_vec();
-                            let train_dataset = dataset[val_size..].to_vec();
+                            synthetic_data.shuffle(&mut rng);
+
+                            // Reserve 15% of the clean synthetic dataset strictly for validation.
+                            // This validation set is never mixed with recent real-world telemetry,
+                            // ensuring the model is always gated against clean baseline behavior.
+                            let val_size = synthetic_data.len() * 15 / 100;
+                            let val_dataset = synthetic_data[0..val_size].to_vec();
+
+                            // The training dataset consists of the rest of the synthetic data + recent real telemetry
+                            let mut train_dataset = synthetic_data[val_size..].to_vec();
+                            train_dataset.append(&mut recent_data);
+                            train_dataset.shuffle(&mut rng);
 
                             // Fine-tune the current model clone in the background instead of training from scratch.
                             // This provides training stability and preserves learned boundaries.
                             let mut new_model = model_clone.read().unwrap().clone();
                             let loss = new_model.train(&train_dataset, 40, 0.015);
-                            
+
                             // Validate model accuracy and verify numerical sanity before promotion
                             let accuracy = new_model.validate(&val_dataset);
                             let is_sane = new_model.is_sane();
 
                             if is_sane && accuracy >= 0.90 {
                                 info!("Model retraining succeeded. Loss: {:.6}, Validation Accuracy: {:.2}%", loss, accuracy * 100.0);
-                                
+
                                 // Swap the model under a brief write lock (minimal block time)
                                 {
                                     let mut model_guard = model_clone.write().unwrap();
                                     *model_guard = new_model;
                                 }
-                                
+
                                 // Save the updated model weights back to the database
                                 {
                                     let model_guard = model_clone.read().unwrap();
@@ -317,7 +322,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("Failed to bind to port {}: {}", port, e));
-    
+
     info!("Null CAPTCHA server running at http://localhost:{}", port);
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 }
@@ -393,7 +398,7 @@ async fn challenge_handler(
         .unwrap_or(4);
 
     let sign_payload = format!("{}.{}.{}.{}", now, salt, difficulty, encryption_key);
-    
+
     let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&state.secret_key)
         .expect("HMAC sign failed");
     mac.update(sign_payload.as_bytes());
@@ -450,7 +455,7 @@ async fn verify_handler(
     // 3. Challenge State Enforcement (Strict Replay & Brute-Force prevention)
     let consumed_key = format!("salt:consumed:{}", payload.salt);
     let fallback_key = format!("salt:fallback:{}", payload.salt);
-    
+
     // Check if challenge was already marked fully consumed
     if state.cache.contains(&consumed_key) {
         warn!("Verification failed: Salt already consumed.");
@@ -574,7 +579,7 @@ async fn verify_handler(
     let mut solved_slider = false;
     let mut is_accessibility = false;
     let target = derive_slider_target(&payload.salt, &state.secret_key);
-    
+
     if let Some(x) = payload.slider_x {
         if (x - target).abs() <= 6 {
             solved_slider = true;
@@ -592,17 +597,17 @@ async fn verify_handler(
 
     // 1. Passive checking (mouse pointer telemetry)
     let features_opt = features::extract_features(&mouse_points);
-    
+
     let mut features_json = String::new();
     if let Some(ref features) = features_opt {
         features_json = serde_json::to_string(&features).unwrap_or_default();
         let feature_arr = features.to_array();
         let mut model_score = state.model.read().unwrap().predict(&feature_arr);
-        
+
         if client_data.plugins == 0 {
             model_score = (model_score - 0.25).max(0.0);
         }
-        
+
         score = model_score;
 
         // Only allow a passive check pass if the active slider fallback challenge is not being submitted.
@@ -621,7 +626,7 @@ async fn verify_handler(
                 let kb_points: Vec<&features::TelemetryPoint> = client_data.points.iter()
                     .filter(|p| (p.y - -1.0).abs() < 0.001)
                     .collect();
-                
+
                 if kb_points.is_empty() {
                     warn!("Automation detected: accessibility mode claimed but no keyboard events recorded.");
                     bot_flag = true;
@@ -643,7 +648,7 @@ async fn verify_handler(
                         // Initial slider position is 25. Each ArrowRight/ArrowLeft moves by 5.
                         let target_x = payload.slider_x.unwrap_or(25);
                         let expected_presses = ((target_x - 25).abs() as f32 / 5.0).ceil() as usize;
-                        
+
                         // Allow some flexibility but ensure they did at least half of the expected keystrokes
                         if kb_points.len() < expected_presses / 2 {
                             warn!("Automation detected: accessibility keypress count {} too low for target distance (expected ~{})", kb_points.len(), expected_presses);
@@ -664,7 +669,7 @@ async fn verify_handler(
                     let max_x = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
                     let span_x = max_x - min_x;
                     let claimed_drag_dist = (payload.slider_x.unwrap_or(25) - 25).abs() as f32;
-                    
+
                     if span_x < claimed_drag_dist - 15.0 {
                         warn!("Automation detected: horizontal mouse movement span ({:.2}px) is less than claimed drag distance ({:.2}px)", span_x, claimed_drag_dist);
                         valid_drag_dist = false;
@@ -696,15 +701,15 @@ async fn verify_handler(
     let user_agent = headers
         .get("user-agent")
         .and_then(|v| v.to_str().ok());
-    
+
     let ip_address = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok().map(|s| s.split(',').next().unwrap_or("").trim().to_string()))
         .unwrap_or_else(|| addr.ip().to_string());
 
     let is_high_confidence = if bot_flag {
-        // Only mark bot as high confidence for retraining if the telemetry features themselves 
-        // look automated (e.g., straight line, low speed variance/jitter), to prevent poisoning 
+        // Only mark bot as high confidence for retraining if the telemetry features themselves
+        // look automated (e.g., straight line, low speed variance/jitter), to prevent poisoning
         // by attackers spoofing browser flags with human movements.
         if let Some(ref features) = features_opt {
             features.speed_var < 0.35 && features.angular_jitter < 0.05
@@ -715,9 +720,20 @@ async fn verify_handler(
         if is_human {
             // Only mark as high confidence human if mouse features exhibit typical human variance
             if let Some(ref features) = features_opt {
-                features.speed_var >= 0.08 &&
-                features.total_duration >= 0.075 && // 0.075 is 150ms normalized (duration / 2000.0)
-                (features.angular_jitter >= 0.005 || features.line_deviation >= 0.001)
+                if payload.slider_x.is_none() {
+                    // Passive check: human movements must be curved, with speed variance, duration and entropy
+                    features.speed_var >= 0.08 &&
+                    features.total_duration >= 0.075 && // 0.075 is 150ms normalized (duration / 2000.0)
+                    features.entropy >= 0.10 &&
+                    features.straightness < 0.95 &&
+                    (features.angular_jitter >= 0.005 || features.line_deviation >= 0.001)
+                } else {
+                    // Active slider drag check: straight path but with human speed/jitter micro-adjustments
+                    features.speed_var >= 0.08 &&
+                    features.total_duration >= 0.075 &&
+                    features.entropy >= 0.02 &&
+                    (features.angular_jitter >= 0.001 || features.line_deviation >= 0.0005)
+                }
             } else {
                 false
             }
@@ -778,7 +794,7 @@ async fn verify_handler(
             // Obvious bot or failed slider check, mark as consumed
             state.cache.insert(consumed_key, 300);
         }
-        
+
         Json(VerifyResponse {
             success: false,
             score,
