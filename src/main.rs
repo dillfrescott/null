@@ -55,7 +55,7 @@ struct VerifyPayload {
     salt: String,
     signature: String,
     timestamp: u64,
-    difficulty: u32,
+    difficulty: f64,
     #[serde(rename = "encryptionKey")]
     encryption_key: String,
     nonce: u64,
@@ -67,7 +67,7 @@ struct VerifyPayload {
 #[serde(rename_all = "camelCase")]
 struct ChallengeResponse {
     salt: String,
-    difficulty: u32,
+    difficulty: f64,
     encryption_key: String,
     timestamp: u64,
     signature: String,
@@ -381,14 +381,22 @@ async fn serve_llms() -> impl IntoResponse {
         .unwrap()
 }
 
-fn verify_pow(salt: &str, nonce: u64, difficulty: u32) -> bool {
+fn verify_pow(salt: &str, nonce: u64, difficulty: f64) -> bool {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(format!("{}{}", salt, nonce).as_bytes());
     let hash_bytes = hasher.finalize();
-    let hash_hex = format!("{:x}", hash_bytes);
-    let prefix = "0".repeat(difficulty as usize);
-    hash_hex.starts_with(&prefix)
+
+    let required_zero_bits = (difficulty * 4.0).round() as usize;
+    let mut zero_bits = 0;
+    for &byte in hash_bytes.iter() {
+        let leading = byte.leading_zeros() as usize;
+        zero_bits += leading;
+        if leading < 8 {
+            break;
+        }
+    }
+    zero_bits >= required_zero_bits
 }
 
 fn derive_slider_target(salt: &str, secret: &[u8]) -> i32 {
@@ -427,8 +435,8 @@ async fn challenge_handler(
 
     let difficulty = std::env::var("NULL_CAPTCHA_DIFFICULTY")
         .unwrap_or_else(|_| "4".to_string())
-        .parse::<u32>()
-        .unwrap_or(4);
+        .parse::<f64>()
+        .unwrap_or(4.0);
 
     let sign_payload = format!("{}.{}.{}.{}", now, salt, difficulty, encryption_key);
 
@@ -1072,6 +1080,36 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_verify_pow_fractional() {
+        let salt = "test_salt";
+        let mut nonce = 0;
+        let mut solved = false;
+        while nonce < 1_000_000 {
+            if verify_pow(salt, nonce, 4.5) {
+                solved = true;
+                break;
+            }
+            nonce += 1;
+        }
+        assert!(solved, "Should find a solution for difficulty 4.5");
+        assert!(verify_pow(salt, nonce, 4.0));
+        
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(format!("{}{}", salt, nonce).as_bytes());
+        let hash_bytes = hasher.finalize();
+        let mut zero_bits = 0;
+        for &byte in hash_bytes.iter() {
+            let leading = byte.leading_zeros() as usize;
+            zero_bits += leading;
+            if leading < 8 {
+                break;
+            }
+        }
+        assert!(zero_bits >= 18);
     }
 }
 

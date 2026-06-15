@@ -416,21 +416,18 @@
                     for (let i = 0; i < batchSize; i++) {
                         const bytes = new Uint8Array(buffers[i]);
 
-                        let match = true;
-                        const fullBytes = Math.floor(difficulty / 2);
-                        for (let j = 0; j < fullBytes; j++) {
-                            if (bytes[j] !== 0) {
-                                match = false;
+                        let zeroBits = 0;
+                        for (let j = 0; j < bytes.length; j++) {
+                            const byte = bytes[j];
+                            const leading = Math.clz32(byte) - 24;
+                            zeroBits += leading;
+                            if (leading < 8) {
                                 break;
                             }
                         }
-                        if (match && difficulty % 2 !== 0) {
-                            if (bytes[fullBytes] >= 16) {
-                                match = false;
-                            }
-                        }
 
-                        if (match) {
+                        const requiredZeroBits = Math.round(difficulty * 4);
+                        if (zeroBits >= requiredZeroBits) {
                             this.nonce = nonces[i];
                             this.isSolved = true;
                             this.isSolving = false;
