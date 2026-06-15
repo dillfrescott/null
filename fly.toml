@@ -3,6 +3,9 @@
 app = "dill-null-captcha"
 primary_region = "iad"
 
+[env]
+  URL = "https://null.dill.moe"
+
 [build]
 
 [http_service]

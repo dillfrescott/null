@@ -46,6 +46,7 @@ struct AppState {
     min_score: f32,
     cache: cache::MemoryCache,
     log_tx: tokio::sync::mpsc::Sender<LogMessage>,
+    expected_host: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -297,6 +298,33 @@ async fn main() {
         }
     });
 
+    // Initialize expected host from URL environment variable if set
+    let expected_host = std::env::var("URL").ok().and_then(|url| {
+        let mut s = url.as_str();
+        if s.starts_with("https://") {
+            s = &s["https://".len()..];
+        } else if s.starts_with("http://") {
+            s = &s["http://".len()..];
+        }
+        if let Some(pos) = s.find('/') {
+            s = &s[..pos];
+        }
+        let clean_host = if let Some(pos) = s.find(':') {
+            &s[..pos]
+        } else {
+            s
+        };
+        if clean_host.is_empty() {
+            None
+        } else {
+            Some(clean_host.to_string())
+        }
+    });
+
+    if let Some(ref host) = expected_host {
+        info!("URL restriction active: only allowing access via domain '{}'", host);
+    }
+
     let state = Arc::new(AppState {
         model,
         _db_conn: std::sync::Mutex::new(db_conn),
@@ -304,9 +332,10 @@ async fn main() {
         min_score,
         cache,
         log_tx,
+        expected_host,
     });
 
-    // 4. Setup router with CORS
+    // 4. Setup router with CORS and host restriction middleware
     let app = Router::new()
         .route("/", get(serve_index))
         .route("/js/null.js", get(serve_js))
@@ -314,6 +343,10 @@ async fn main() {
         .route("/api/challenge", get(challenge_handler))
         .route("/api/verify", post(verify_handler))
         .route("/api/validate", post(validate_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            host_guard_middleware,
+        ))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -883,3 +916,162 @@ fn compute_points_hash(points: &[features::TelemetryPoint]) -> String {
     let hash_bytes = hasher.finalize();
     format!("{:x}", hash_bytes)
 }
+
+/// Middleware to restrict access only to the domain specified in the URL environment variable
+async fn host_guard_middleware(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    if let Some(ref expected) = state.expected_host {
+        let host_header = request
+            .headers()
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok());
+
+        let matches = if let Some(host) = host_header {
+            let clean_req_host = if let Some(pos) = host.find(':') {
+                &host[..pos]
+            } else {
+                host
+            };
+            clean_req_host == expected
+        } else {
+            false
+        };
+
+        if !matches {
+            warn!("Forbidden access from host: {:?}", host_header);
+            return Err(axum::http::StatusCode::FORBIDDEN);
+        }
+    }
+
+    Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        routing::get,
+        Router,
+    };
+    use tower::ServiceExt;
+
+    fn create_test_state() -> Arc<AppState> {
+        let model = Arc::new(std::sync::RwLock::new(model::MLP::new_default()));
+        let db_conn = db::init_db(":memory:").unwrap();
+        let (log_tx, _) = tokio::sync::mpsc::channel(1);
+        Arc::new(AppState {
+            model,
+            _db_conn: std::sync::Mutex::new(db_conn),
+            secret_key: vec![0u8; 32],
+            min_score: 0.5,
+            cache: cache::MemoryCache::new(),
+            log_tx,
+            expected_host: Some("null.dill.moe".to_string()),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_host_guard_middleware_allowed() {
+        let state = create_test_state();
+        let app = Router::new()
+            .route("/", get(|| async { "OK" }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                host_guard_middleware,
+            ))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("Host", "null.dill.moe")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_host_guard_middleware_allowed_with_port() {
+        let state = create_test_state();
+        let app = Router::new()
+            .route("/", get(|| async { "OK" }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                host_guard_middleware,
+            ))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("Host", "null.dill.moe:443")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_host_guard_middleware_forbidden() {
+        let state = create_test_state();
+        let app = Router::new()
+            .route("/", get(|| async { "OK" }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                host_guard_middleware,
+            ))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header("Host", "evil-domain.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_host_guard_middleware_missing_host() {
+        let state = create_test_state();
+        let app = Router::new()
+            .route("/", get(|| async { "OK" }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                host_guard_middleware,
+            ))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}
+
