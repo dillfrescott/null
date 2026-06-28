@@ -80,7 +80,7 @@ impl RateLimiter {
 /// Application state containing neural network, database connection, and security configurations
 struct AppState {
     model: Arc<std::sync::RwLock<model::MiniTransformer>>,
-    _db_conn: std::sync::Mutex<rusqlite::Connection>,
+    db_conn: std::sync::Mutex<rusqlite::Connection>,
     secret_key: Vec<u8>,
     min_score: f32,
     cache: cache::MemoryCache,
@@ -259,8 +259,8 @@ async fn main() {
                     logged_interactions_count += 1;
                 }
 
-                // Periodically retrain and adapt the model (every 10 new logged interactions)
-                if logged_interactions_count >= 10 {
+                // Periodically retrain and adapt the model (every 50 new logged interactions)
+                if logged_interactions_count >= 50 {
                     info!("Adapting neural network: retraining model on recent telemetry logs + synthetic dataset...");
 
                     // Fetch recent logs
@@ -367,7 +367,7 @@ async fn main() {
 
     let state = Arc::new(AppState {
         model,
-        _db_conn: std::sync::Mutex::new(db_conn),
+        db_conn: std::sync::Mutex::new(db_conn),
         secret_key,
         min_score,
         cache,
@@ -655,10 +655,12 @@ async fn verify_handler(
         }
 
         // Check persistent database for replay checks
-        let is_replay = {
-            let conn = state._db_conn.lock().unwrap();
-            db::is_telemetry_replayed(&conn, &points_hash).unwrap_or(false)
-        };
+        let state_clone = Arc::clone(&state);
+        let hash_clone = points_hash.clone();
+        let is_replay = tokio::task::spawn_blocking(move || {
+            let conn = state_clone.db_conn.lock().unwrap();
+            db::is_telemetry_replayed(&conn, &hash_clone).unwrap_or(false)
+        }).await.unwrap_or(false);
         if is_replay {
             warn!("Verification failed: Replayed telemetry detected in database!");
             return Json(VerifyResponse {
@@ -955,10 +957,12 @@ async fn validate_handler(
     }
 
     // Mark token as used in database atomically to prevent race conditions
-    let mark_success = {
-        let conn = state._db_conn.lock().unwrap();
-        db::try_mark_token_used(&conn, &payload.token).unwrap_or(false)
-    };
+    let state_clone = Arc::clone(&state);
+    let token_clone = payload.token.clone();
+    let mark_success = tokio::task::spawn_blocking(move || {
+        let conn = state_clone.db_conn.lock().unwrap();
+        db::try_mark_token_used(&conn, &token_clone).unwrap_or(false)
+    }).await.unwrap_or(false);
     if !mark_success {
         warn!("Replay validation check: Token has already been used (database).");
         return Json(ValidateResponse {
@@ -1045,7 +1049,7 @@ mod tests {
         let (log_tx, _) = tokio::sync::mpsc::channel(1);
         Arc::new(AppState {
             model,
-            _db_conn: std::sync::Mutex::new(db_conn),
+            db_conn: std::sync::Mutex::new(db_conn),
             secret_key: vec![0u8; 32],
             min_score: 0.5,
             cache: cache::MemoryCache::new(),

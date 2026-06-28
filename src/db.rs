@@ -150,7 +150,6 @@ pub fn log_telemetry(
 }
 
 /// Check if telemetry points have already been used to prevent replay attacks
-#[allow(dead_code)]
 pub fn is_telemetry_replayed(conn: &Connection, points_hash: &str) -> Result<bool, String> {
     if points_hash.is_empty() {
         return Ok(false);
@@ -165,22 +164,8 @@ pub fn is_telemetry_replayed(conn: &Connection, points_hash: &str) -> Result<boo
     Ok(exists)
 }
 
-/// Check if a token has already been validated (to prevent reuse)
-#[allow(dead_code)]
-pub fn is_token_used(conn: &Connection, token: &str) -> Result<bool, String> {
-    let mut stmt = conn
-        .prepare("SELECT 1 FROM used_tokens WHERE token = ?1")
-        .map_err(|e| format!("Prepare query failed: {}", e))?;
-    
-    let exists = stmt.exists(params![token])
-        .map_err(|e| format!("Query token failed: {}", e))?;
-
-    Ok(exists)
-}
-
 /// Mark a token as validated atomically. Returns Ok(true) if the token was successfully
 /// marked as used, and Ok(false) if it was already marked as used (due to primary key constraint violation).
-#[allow(dead_code)]
 pub fn try_mark_token_used(conn: &Connection, token: &str) -> Result<bool, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -204,7 +189,6 @@ pub fn try_mark_token_used(conn: &Connection, token: &str) -> Result<bool, Strin
 }
 
 /// Clean up expired tokens (older than max_age_secs)
-#[allow(dead_code)]
 pub fn prune_old_tokens(conn: &Connection, max_age_secs: u64) -> Result<usize, String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
