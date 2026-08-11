@@ -1,0 +1,10 @@
+.git
+.gitignore
+target
+captcha.db
+captcha.db-shm
+captcha.db-wal
+captcha_data
+fly.toml
+compose.yaml
+README.md

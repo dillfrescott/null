@@ -38,8 +38,9 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            overflow: hidden;
+            overflow-x: hidden;
             position: relative;
+            padding: 1rem;
         }
 
         /* Ambient Background Glow (Disabled for OLED minimal look) */
@@ -52,7 +53,7 @@
             border: 1px solid var(--border-subtle);
             border-radius: 12px;
             padding: 2.5rem;
-            width: 100%;
+            width: min(420px, 100%);
             max-width: 420px;
             box-shadow: none;
             display: flex;
@@ -314,7 +315,7 @@
             </div>
 
             <!-- Simplified CAPTCHA Checkbox Widget -->
-            <div id="captcha-widget" style="width: 350px; margin: 0.5rem auto;"></div>
+            <div id="captcha-widget" style="width: min(350px, 100%); margin: 0.5rem auto;"></div>
         </form>
         <div style="text-align: center; margin-top: 1rem; border-top: 1px solid var(--border-subtle); padding-top: 1rem;">
             <button class="btn-secondary" id="how-to-btn" style="
@@ -327,7 +328,7 @@
                 font-size: 0.85rem;
                 transition: all 0.2s ease;
                 width: 100%;
-            " onmouseover="this.style.borderColor='var(--text-primary)'; this.style.color='var(--text-primary)';" onmouseout="this.style.borderColor='var(--border-subtle)'; this.style.color='var(--text-secondary)';">How to Use</button>
+            " aria-haspopup="dialog" onmouseover="this.style.borderColor='var(--text-primary)'; this.style.color='var(--text-primary)';" onmouseout="this.style.borderColor='var(--border-subtle)'; this.style.color='var(--text-secondary)';">How to Use</button>
         </div>
     </div>
 
@@ -336,8 +337,8 @@
     <script>
         window.addEventListener("load", () => {
             window.NullCaptcha.render('captcha-widget', {
-                onSuccess: (token) => {
-                    console.log("Null CAPTCHA Verified! Token:", token);
+                onSuccess: () => {
+                    console.log("Null CAPTCHA verified successfully.");
                 },
                 onFailure: (err) => {
                     console.error("Null CAPTCHA Verification Failed:", err);
@@ -373,7 +374,7 @@
                 scriptBlock.textContent = `<script src="${currentOrigin}/js/null.js" async defer><\/script>`;
             }
             if (validateBlock) {
-                validateBlock.textContent = `// Request\nPOST ${currentOrigin}/api/validate\nContent-Type: application/json\n{ "token": "timestamp.score.nonce.signature" }\n\n// Success Response\n{ "success": true, "score": 1.0 }`;
+                validateBlock.textContent = `// Request\nPOST ${currentOrigin}/api/validate\nContent-Type: application/json\n{ "token": "timestamp|score|nonce|signature" }\n\n// Success Response\n{ "success": true, "score": 1.0 }`;
             }
         });
     </script>
@@ -409,7 +410,7 @@
             font-family: 'Outfit', sans-serif;
             color: var(--text-primary);
         ">
-            <button id="close-modal-btn" style="
+            <button id="close-modal-btn" type="button" aria-label="Close integration guide" style="
                 position: absolute;
                 top: 1.5rem;
                 right: 1.5rem;
@@ -467,7 +468,7 @@
                     <pre id="integration-validate-block" style="background: #111; border: 1px solid #222; padding: 0.75rem; border-radius: 6px; overflow-x: auto; margin: 0; font-size: 0.8rem; color: #ffbc7d; line-height: 1.4; font-family: monospace;">// Request
 POST https://null.dill.moe/api/validate
 Content-Type: application/json
-{ "token": "timestamp.score.nonce.signature" }
+{ "token": "timestamp|score|nonce|signature" }
 
 // Success Response
 { "success": true, "score": 1.0 }</pre>

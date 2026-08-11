@@ -1,5 +1,7 @@
-use serde::{Deserialize, Serialize};
+#![allow(clippy::needless_range_loop, clippy::type_complexity)]
+
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 const T: usize = 13;
 const D: usize = 16;
@@ -12,7 +14,7 @@ pub struct MiniTransformer {
     // Input sequence size T = 13 (features), embedding dimension D = 16
     pub w_emb: [[f32; D]; T],
     pub e_pos: [[f32; D]; T],
-    
+
     // Self-Attention projections (Q, K, V) -> D x D
     pub w_q: [[f32; D]; D],
     pub b_q: [f32; D],
@@ -78,14 +80,24 @@ impl MiniTransformer {
         let mut w_q = [[0.0f32; D]; D];
         let mut w_k = [[0.0f32; D]; D];
         let mut w_v = [[0.0f32; D]; D];
-        for row in w_q.iter_mut() { fill_matrix(row, D, D); }
-        for row in w_k.iter_mut() { fill_matrix(row, D, D); }
-        for row in w_v.iter_mut() { fill_matrix(row, D, D); }
+        for row in w_q.iter_mut() {
+            fill_matrix(row, D, D);
+        }
+        for row in w_k.iter_mut() {
+            fill_matrix(row, D, D);
+        }
+        for row in w_v.iter_mut() {
+            fill_matrix(row, D, D);
+        }
 
         let mut w1 = [[0.0f32; D_FF]; D];
         let mut w2 = [[0.0f32; D]; D_FF];
-        for row in w1.iter_mut() { fill_matrix(row, D, D_FF); }
-        for row in w2.iter_mut() { fill_matrix(row, D_FF, D); }
+        for row in w1.iter_mut() {
+            fill_matrix(row, D, D_FF);
+        }
+        for row in w2.iter_mut() {
+            fill_matrix(row, D_FF, D);
+        }
 
         let mut w_out = [0.0f32; D];
         let limit = (6.0f32 / (D as f32 + 1.0f32)).sqrt();
@@ -120,7 +132,9 @@ impl MiniTransformer {
     fn softmax_row(row: &[f32; T]) -> [f32; T] {
         let mut max_val = row[0];
         for j in 1..T {
-            if row[j] > max_val { max_val = row[j]; }
+            if row[j] > max_val {
+                max_val = row[j];
+            }
         }
         let mut exps = [0.0f32; T];
         let mut sum_exp = 0.0f32;
@@ -312,6 +326,10 @@ impl MiniTransformer {
     /// Train the MiniTransformer on a dataset of (input, target) pairs.
     /// target: 1.0 for Human, 0.0 for Bot.
     pub fn train(&mut self, dataset: &[([f32; T], f32)], epochs: usize, lr: f32) -> f32 {
+        if dataset.is_empty() || epochs == 0 || !lr.is_finite() || lr <= 0.0 {
+            return 0.0;
+        }
+
         use rand::seq::SliceRandom;
         let mut total_loss = 0.0;
         let mut rng = rand::thread_rng();
@@ -503,8 +521,10 @@ impl MiniTransformer {
                     for i in 0..T {
                         for j in 0..T {
                             for m in 0..HEAD_DIM {
-                                d_q[i][HEAD_DIM + m] += scale * d_s1[i][j] * cache.k[j][HEAD_DIM + m];
-                                d_k[j][HEAD_DIM + m] += scale * d_s1[i][j] * cache.q[i][HEAD_DIM + m];
+                                d_q[i][HEAD_DIM + m] +=
+                                    scale * d_s1[i][j] * cache.k[j][HEAD_DIM + m];
+                                d_k[j][HEAD_DIM + m] +=
+                                    scale * d_s1[i][j] * cache.q[i][HEAD_DIM + m];
                             }
                         }
                     }
@@ -686,40 +706,46 @@ impl MiniTransformer {
 
         // 1. Generate Bot Features - Group A: Naive linear bots (target = 0.0)
         for _ in 0..400 {
-            dataset.push(([
-                rng.gen_range(0.98..1.0),
-                rng.gen_range(0.3..0.9),
-                rng.gen_range(0.0..0.02),
-                rng.gen_range(0.0..0.01),
-                rng.gen_range(0.05..0.2),
-                rng.gen_range(0.0..0.01),
-                rng.gen_range(0.1..0.4),
-                rng.gen_range(0.0..0.05),
-                rng.gen_range(0.0..0.03),
-                rng.gen_range(0.0..0.01),
-                rng.gen_range(0.0..0.01),
-                rng.gen_range(0.0..0.02),
-                rng.gen_range(0.0..0.05),
-            ], 0.0));
+            dataset.push((
+                [
+                    rng.gen_range(0.98..1.0),
+                    rng.gen_range(0.3..0.9),
+                    rng.gen_range(0.0..0.02),
+                    rng.gen_range(0.0..0.01),
+                    rng.gen_range(0.05..0.2),
+                    rng.gen_range(0.0..0.01),
+                    rng.gen_range(0.1..0.4),
+                    rng.gen_range(0.0..0.05),
+                    rng.gen_range(0.0..0.03),
+                    rng.gen_range(0.0..0.01),
+                    rng.gen_range(0.0..0.01),
+                    rng.gen_range(0.0..0.02),
+                    rng.gen_range(0.0..0.05),
+                ],
+                0.0,
+            ));
         }
 
         // 2. Generate Bot Features - Group B: Bezier / Curve bots (target = 0.0)
         for _ in 0..400 {
-            dataset.push(([
-                rng.gen_range(0.7..0.95),
-                rng.gen_range(0.2..0.7),
-                rng.gen_range(0.02..0.35),
-                rng.gen_range(0.0..0.03),
-                rng.gen_range(0.1..0.5),
-                rng.gen_range(0.02..0.15),
-                rng.gen_range(0.15..0.6),
-                rng.gen_range(0.0..0.08),
-                rng.gen_range(0.01..0.2),
-                rng.gen_range(0.0..0.03),
-                rng.gen_range(0.0..0.02),
-                rng.gen_range(0.0..0.04),
-                rng.gen_range(0.0..0.08),
-            ], 0.0));
+            dataset.push((
+                [
+                    rng.gen_range(0.7..0.95),
+                    rng.gen_range(0.2..0.7),
+                    rng.gen_range(0.02..0.35),
+                    rng.gen_range(0.0..0.03),
+                    rng.gen_range(0.1..0.5),
+                    rng.gen_range(0.02..0.15),
+                    rng.gen_range(0.15..0.6),
+                    rng.gen_range(0.0..0.08),
+                    rng.gen_range(0.01..0.2),
+                    rng.gen_range(0.0..0.03),
+                    rng.gen_range(0.0..0.02),
+                    rng.gen_range(0.0..0.04),
+                    rng.gen_range(0.0..0.08),
+                ],
+                0.0,
+            ));
         }
 
         // 3. Generate Bot Features - Group C: Adversarial bots mimicking humans (target = 0.0)
@@ -740,31 +766,47 @@ impl MiniTransformer {
             let dwell_ratio = rng.gen_range(0.01..0.06);
             let timing_jitter = rng.gen_range(0.02..0.1);
 
-            dataset.push(([
-                straightness, avg_speed, speed_var, angular_jitter,
-                total_duration, line_deviation, point_count, entropy,
-                accel_var, curvature_change, overshoot, dwell_ratio, timing_jitter,
-            ], 0.0));
+            dataset.push((
+                [
+                    straightness,
+                    avg_speed,
+                    speed_var,
+                    angular_jitter,
+                    total_duration,
+                    line_deviation,
+                    point_count,
+                    entropy,
+                    accel_var,
+                    curvature_change,
+                    overshoot,
+                    dwell_ratio,
+                    timing_jitter,
+                ],
+                0.0,
+            ));
         }
 
         // 4. Generate Bot Features - Group D: Replay/segmented bots (target = 0.0)
         // Bots that replay recorded human paths but with robotic timing.
         for _ in 0..200 {
-            dataset.push(([
-                rng.gen_range(0.6..0.96),
-                rng.gen_range(0.2..0.7),
-                rng.gen_range(0.05..0.3),
-                rng.gen_range(0.02..0.15),
-                rng.gen_range(0.1..0.6),
-                rng.gen_range(0.01..0.12),
-                rng.gen_range(0.2..0.6),
-                rng.gen_range(0.05..0.25),
-                rng.gen_range(0.01..0.08),  // low accel variance
-                rng.gen_range(0.01..0.06),
-                rng.gen_range(0.0..0.01),
-                rng.gen_range(0.0..0.03),   // low dwell
-                rng.gen_range(0.01..0.06),  // low timing jitter
-            ], 0.0));
+            dataset.push((
+                [
+                    rng.gen_range(0.6..0.96),
+                    rng.gen_range(0.2..0.7),
+                    rng.gen_range(0.05..0.3),
+                    rng.gen_range(0.02..0.15),
+                    rng.gen_range(0.1..0.6),
+                    rng.gen_range(0.01..0.12),
+                    rng.gen_range(0.2..0.6),
+                    rng.gen_range(0.05..0.25),
+                    rng.gen_range(0.01..0.08), // low accel variance
+                    rng.gen_range(0.01..0.06),
+                    rng.gen_range(0.0..0.01),
+                    rng.gen_range(0.0..0.03),  // low dwell
+                    rng.gen_range(0.01..0.06), // low timing jitter
+                ],
+                0.0,
+            ));
         }
 
         // 5. Generate Human Features (target = 1.0)
@@ -785,11 +827,24 @@ impl MiniTransformer {
             let dwell_ratio = rng.gen_range(0.02..0.25);
             let timing_jitter = rng.gen_range(0.05..0.5);
 
-            dataset.push(([
-                straightness, avg_speed, speed_var, angular_jitter,
-                total_duration, line_deviation, point_count, entropy,
-                accel_var, curvature_change, overshoot, dwell_ratio, timing_jitter,
-            ], 1.0));
+            dataset.push((
+                [
+                    straightness,
+                    avg_speed,
+                    speed_var,
+                    angular_jitter,
+                    total_duration,
+                    line_deviation,
+                    point_count,
+                    entropy,
+                    accel_var,
+                    curvature_change,
+                    overshoot,
+                    dwell_ratio,
+                    timing_jitter,
+                ],
+                1.0,
+            ));
         }
 
         // 6. Generate Human Slider Drag Features (target = 1.0)
@@ -809,22 +864,55 @@ impl MiniTransformer {
             let dwell_ratio = rng.gen_range(0.01..0.08);
             let timing_jitter = rng.gen_range(0.03..0.2);
 
-            dataset.push(([
-                straightness, avg_speed, speed_var, angular_jitter,
-                total_duration, line_deviation, point_count, entropy,
-                accel_var, curvature_change, overshoot, dwell_ratio, timing_jitter,
-            ], 1.0));
+            dataset.push((
+                [
+                    straightness,
+                    avg_speed,
+                    speed_var,
+                    angular_jitter,
+                    total_duration,
+                    line_deviation,
+                    point_count,
+                    entropy,
+                    accel_var,
+                    curvature_change,
+                    overshoot,
+                    dwell_ratio,
+                    timing_jitter,
+                ],
+                1.0,
+            ));
         }
 
         dataset
     }
 
-    /// Load default trained weights.
+    /// Build a validated baseline model. Random initialization occasionally
+    /// converges poorly, so reject weak candidates instead of serving them.
     pub fn new_default() -> Self {
-        let mut model = Self::new_random();
-        let dataset = Self::generate_synthetic_dataset();
-        model.train(&dataset, 25, 0.05);
-        model
+        let validation = Self::generate_synthetic_dataset();
+        let mut best: Option<(Self, f32)> = None;
+
+        for _ in 0..3 {
+            let mut candidate = Self::new_random();
+            let training = Self::generate_synthetic_dataset();
+            candidate.train(&training, 35, 0.01);
+            let accuracy = candidate.validate(&validation);
+
+            if candidate.is_sane() && accuracy >= 0.90 {
+                return candidate;
+            }
+            if candidate.is_sane()
+                && best
+                    .as_ref()
+                    .is_none_or(|(_, best_accuracy)| accuracy > *best_accuracy)
+            {
+                best = Some((candidate, accuracy));
+            }
+        }
+
+        best.map(|(model, _)| model)
+            .expect("model training produced no numerically sane candidate")
     }
 }
 
@@ -836,11 +924,11 @@ mod tests {
     fn test_transformer_validation_and_sanity() {
         let model = MiniTransformer::new_default();
         assert!(model.is_sane());
-        
+
         let dataset = MiniTransformer::generate_synthetic_dataset();
         let accuracy = model.validate(&dataset);
         assert!(accuracy >= 0.90, "Accuracy was too low: {}", accuracy);
-        
+
         // Corrupt model with NaN to test is_sane
         let mut corrupted_model = model;
         corrupted_model.b_out = f32::NAN;

@@ -16,6 +16,7 @@
         isSolving: false,
         isSolved: false,
         nonce: 0,
+        solveGeneration: 0,
 
         /**
          * Initialize the tracker
@@ -47,8 +48,8 @@
                 this.serverUrl = config.serverUrl.replace(/\/$/, "");
             }
 
-            this.maxPoints = config.maxPoints || 80;
-            this.sampleIntervalMs = config.sampleIntervalMs || 15;
+            this.maxPoints = Math.max(5, Math.min(200, Number(config.maxPoints) || 80));
+            this.sampleIntervalMs = Math.max(5, Math.min(1000, Number(config.sampleIntervalMs) || 15));
             this.startTime = Date.now();
 
             this.startTracking();
@@ -95,7 +96,7 @@
                         position: relative;
                         user-select: none;
                         margin: 0.5rem 0;
-                        width: 350px;
+                        width: min(350px, 100%);
                         box-sizing: border-box;
                         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
                     }
@@ -103,6 +104,7 @@
                         display: flex;
                         align-items: center;
                         gap: 1rem;
+                        min-width: 0;
                     }
                     .checkbox-container {
                         width: 24px;
@@ -186,6 +188,7 @@
                         font-size: 0.95rem;
                         font-weight: 500;
                         color: #ffffff;
+                        overflow-wrap: anywhere;
                     }
                     .captcha-brand {
                         display: flex;
@@ -220,7 +223,7 @@
             containerEl.innerHTML = `
                 <div class="${initialClass}" id="null-captcha-widget">
                     <div class="captcha-left">
-                        <div class="checkbox-container" id="null-checkbox-btn">
+                        <div class="checkbox-container" id="null-checkbox-btn" role="button" tabindex="0" aria-label="Verify that you are human">
                             <div class="checkbox-spinner"></div>
                             <div class="checkbox-checkmark">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
@@ -287,13 +290,14 @@
                 }
             };
 
-            checkboxBtn.addEventListener('click', () => {
+            const activateCheckbox = () => {
                 if (captchaWidget.classList.contains('failed')) {
                     // Reset challenge state to allow a clean retry
                     NullCaptcha.challenge = null;
                     NullCaptcha.isSolved = false;
                     NullCaptcha.isSolving = false;
                     NullCaptcha.nonce = 0;
+                    NullCaptcha.solveGeneration++;
                     NullCaptcha.points = [];
                     NullCaptcha.startTime = Date.now();
 
@@ -312,6 +316,13 @@
                     textLabel.textContent = "I'm not a robot";
                 }
                 runVerification(false);
+            };
+            checkboxBtn.addEventListener('click', activateCheckbox);
+            checkboxBtn.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    activateCheckbox();
+                }
             });
             if (isAuto) {
                 setTimeout(() => runVerification(true), 50);
@@ -357,13 +368,42 @@
          * Fetch a fresh PoW challenge from the server
          */
         async fetchChallenge() {
+            const generation = ++this.solveGeneration;
+            this.isSolving = false;
+            this.isSolved = false;
+            this.nonce = 0;
+
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 10000);
             try {
-                const response = await fetch(`${this.serverUrl}/api/challenge`);
-                if (!response.ok) throw new Error("Failed to fetch challenge");
-                this.challenge = await response.json();
-                this.solveChallenge();
+                const response = await fetch(`${this.serverUrl}/api/challenge`, {
+                    signal: controller.signal,
+                    cache: "no-store"
+                });
+                if (!response.ok) throw new Error(`Failed to fetch challenge (${response.status})`);
+                const challenge = await response.json();
+                if (typeof challenge.salt !== "string" || challenge.salt.length !== 16 ||
+                    typeof challenge.encryptionKey !== "string" || challenge.encryptionKey.length !== 32 ||
+                    typeof challenge.signature !== "string" ||
+                    !Number.isFinite(challenge.timestamp) ||
+                    !Number.isFinite(challenge.difficulty) ||
+                    challenge.difficulty < 1 || challenge.difficulty > 6) {
+                    throw new Error("Server returned a malformed challenge");
+                }
+                if (generation !== this.solveGeneration) return false;
+                this.challenge = challenge;
+                void this.solveChallenge(challenge, generation);
+                return true;
             } catch (err) {
+                if (generation === this.solveGeneration) {
+                    this.challenge = null;
+                    this.isSolving = false;
+                    this.isSolved = false;
+                }
                 console.error("Null CAPTCHA: Challenge fetch failed", err);
+                return false;
+            } finally {
+                clearTimeout(timeout);
             }
         },
 
@@ -381,69 +421,62 @@
         /**
          * Solve the PoW puzzle in background batches to ensure UI responsiveness
          */
-        async solveChallenge() {
-            if (!this.challenge) return;
-            this.isSolving = true;
-            this.isSolved = false;
-            this.nonce = 0;
-
-            const salt = this.challenge.salt;
-            const difficulty = this.challenge.difficulty;
-
+        async solveChallenge(challenge, generation) {
             if (!window.crypto || !window.crypto.subtle) {
                 console.error("Null CAPTCHA: Web Crypto API not available.");
-                this.isSolving = false;
                 return;
             }
 
+            this.isSolving = true;
+            this.isSolved = false;
+            this.nonce = 0;
+            const encoder = new TextEncoder();
+            const requiredZeroBits = Math.round(challenge.difficulty * 4);
+            const deadline = Math.min(
+                Date.now() + 285000,
+                (challenge.timestamp + 285) * 1000
+            );
             let currentNonce = 0;
             const batchSize = 250;
 
-            const solveBatch = async () => {
-                if (!this.isSolving) return;
-
-                try {
+            try {
+                while (generation === this.solveGeneration && Date.now() < deadline) {
                     const promises = [];
-                    const nonces = [];
                     for (let i = 0; i < batchSize; i++) {
-                        const nonce = currentNonce + i;
-                        nonces.push(nonce);
-                        const buf = new TextEncoder().encode(salt + nonce);
-                        promises.push(crypto.subtle.digest("SHA-256", buf));
+                        promises.push(crypto.subtle.digest(
+                            "SHA-256",
+                            encoder.encode(challenge.salt + (currentNonce + i))
+                        ));
                     }
 
                     const buffers = await Promise.all(promises);
-                    for (let i = 0; i < batchSize; i++) {
+                    if (generation !== this.solveGeneration) return;
+                    for (let i = 0; i < buffers.length; i++) {
                         const bytes = new Uint8Array(buffers[i]);
-
                         let zeroBits = 0;
-                        for (let j = 0; j < bytes.length; j++) {
-                            const byte = bytes[j];
+                        for (const byte of bytes) {
                             const leading = Math.clz32(byte) - 24;
                             zeroBits += leading;
-                            if (leading < 8) {
-                                break;
-                            }
+                            if (leading < 8) break;
                         }
-
-                        const requiredZeroBits = Math.round(difficulty * 4);
                         if (zeroBits >= requiredZeroBits) {
-                            this.nonce = nonces[i];
+                            this.nonce = currentNonce + i;
                             this.isSolved = true;
                             this.isSolving = false;
                             return;
                         }
                     }
-
                     currentNonce += batchSize;
-                    setTimeout(solveBatch, 0);
-                } catch (err) {
-                    console.error("Null CAPTCHA: PoW solve error", err);
-                    this.isSolving = false;
+                    await new Promise(resolve => setTimeout(resolve, 0));
                 }
-            };
+            } catch (err) {
+                console.error("Null CAPTCHA: PoW solve error", err);
+            }
 
-            await solveBatch();
+            if (generation === this.solveGeneration) {
+                this.isSolving = false;
+                this.isSolved = false;
+            }
         },
 
         /**
@@ -516,7 +549,7 @@
                     <canvas id="null-slider-canvas" width="300" height="80" style="display: block; width: 100%; height: 100%;"></canvas>
                 </div>
                 <div class="null-slider-track-container" style="position: relative; width: 300px; height: 16px; background: #161616; border: 1px solid rgba(255,255,255,0.05); border-radius: 8px;">
-                    <div id="null-slider-thumb" tabindex="0" aria-label="Slider handle" style="position: absolute; top: -5px; left: 0; width: 26px; height: 26px; background: #ffffff; border-radius: 50%; cursor: grab; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 5px rgba(0,0,0,0.5); outline: none; border: 1px solid #ffffff; transition: background 0.1s ease;">
+                    <div id="null-slider-thumb" role="slider" tabindex="0" aria-label="Puzzle slider" aria-valuemin="20" aria-valuemax="280" aria-valuenow="25" style="position: absolute; top: -5px; left: 0; width: 26px; height: 26px; background: #ffffff; border-radius: 50%; cursor: grab; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 5px rgba(0,0,0,0.5); outline: none; border: 1px solid #ffffff; transition: background 0.1s ease; touch-action: none;">
                         <svg viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="width: 12px; height: 12px;"><polyline points="9 18 15 12 9 6"></polyline></svg>
                     </div>
                 </div>
@@ -629,6 +662,7 @@
                 currentX = Math.max(20, Math.min(280, x));
                 const thumbLeft = ((currentX - 20) / 260) * (300 - 26);
                 thumb.style.left = `${thumbLeft}px`;
+                thumb.setAttribute('aria-valuenow', String(Math.round(currentX)));
                 drawPiece(currentX);
             };
 
@@ -673,7 +707,8 @@
                                 NullCaptcha.isSolved = false;
                                 NullCaptcha.isSolving = false;
                                 NullCaptcha.nonce = 0;
-                                
+                                NullCaptcha.solveGeneration++;
+
                                 // Perform a new passive verify check, which will fail and trigger fallback
                                 const verifyResult = await NullCaptcha.verify({ clearPoints: true });
                                 
@@ -792,20 +827,22 @@
          * Submit telemetry to the Null CAPTCHA server and get a validation token
          */
         async verify(sliderParams = {}) {
-            // Wait for background PoW to finish if the user clicked too fast
-            while (this.isSolving && !this.isSolved) {
-                await new Promise(r => setTimeout(r, 50));
+            const challengeAge = this.challenge
+                ? (Date.now() / 1000) - this.challenge.timestamp
+                : Infinity;
+            if (!this.challenge || challengeAge > 280 || (!this.isSolving && !this.isSolved)) {
+                await this.fetchChallenge();
             }
 
-            if (!this.isSolved) {
-                // If it failed or wasn't loaded, fetch and try solving blockingly
-                await this.fetchChallenge();
-                while (this.isSolving && !this.isSolved) {
-                    await new Promise(r => setTimeout(r, 50));
-                }
+            const waitDeadline = Date.now() + 285000;
+            while (this.isSolving && !this.isSolved && Date.now() < waitDeadline) {
+                await new Promise(resolve => setTimeout(resolve, 50));
             }
 
             if (!this.isSolved || !this.challenge) {
+                this.solveGeneration++;
+                this.isSolving = false;
+                this.challenge = null;
                 return { success: false, error: "PoW challenge solve timed out or server unavailable." };
             }
 
@@ -857,13 +894,17 @@
 
                 const result = await response.json();
                 if (!result.success && !result.fallbackRequired) {
+                    this.solveGeneration++;
                     this.isSolved = false;
+                    this.isSolving = false;
                     this.challenge = null;
                 }
                 return result;
             } catch (err) {
                 console.error("Null CAPTCHA verification failed:", err);
+                this.solveGeneration++;
                 this.isSolved = false;
+                this.isSolving = false;
                 this.challenge = null;
                 return { success: false, error: err.message };
             }

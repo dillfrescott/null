@@ -9,19 +9,19 @@ pub struct TelemetryPoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureVector {
-    pub straightness: f32,       // Straight-line distance / Path length
-    pub avg_speed: f32,          // Average velocity (px/ms)
-    pub speed_var: f32,          // Standard deviation of speed / Mean speed
-    pub angular_jitter: f32,     // Sum of absolute changes in angle
-    pub total_duration: f32,     // Duration in ms, normalized
-    pub line_deviation: f32,     // Avg perpendicular distance to direct line
-    pub point_count: f32,        // Number of points, normalized
-    pub entropy: f32,            // Entropy of direction changes
-    pub accel_var: f32,          // Variance of acceleration (jerkiness)
-    pub curvature_change: f32,   // Mean absolute change in turning angles
-    pub overshoot: f32,          // Max distance beyond endpoint / straight_dist
-    pub dwell_ratio: f32,        // Fraction of time spent near-zero speed
-    pub timing_jitter: f32,      // Std dev of inter-sample intervals / mean interval
+    pub straightness: f32,     // Straight-line distance / Path length
+    pub avg_speed: f32,        // Average velocity (px/ms)
+    pub speed_var: f32,        // Standard deviation of speed / Mean speed
+    pub angular_jitter: f32,   // Sum of absolute changes in angle
+    pub total_duration: f32,   // Duration in ms, normalized
+    pub line_deviation: f32,   // Avg perpendicular distance to direct line
+    pub point_count: f32,      // Number of points, normalized
+    pub entropy: f32,          // Entropy of direction changes
+    pub accel_var: f32,        // Variance of acceleration (jerkiness)
+    pub curvature_change: f32, // Mean absolute change in turning angles
+    pub overshoot: f32,        // Max distance beyond endpoint / straight_dist
+    pub dwell_ratio: f32,      // Fraction of time spent near-zero speed
+    pub timing_jitter: f32,    // Std dev of inter-sample intervals / mean interval
 }
 
 impl FeatureVector {
@@ -45,17 +45,23 @@ impl FeatureVector {
 }
 
 pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
-    if points.len() < 5 {
+    if !(5..=256).contains(&points.len())
+        || points.iter().any(|p| {
+            !p.x.is_finite()
+                || !p.y.is_finite()
+                || !p.t.is_finite()
+                || p.x.abs() > 1_000_000.0
+                || p.y.abs() > 1_000_000.0
+                || !(0.0..=600_000.0).contains(&p.t)
+        })
+        || points.windows(2).any(|pair| pair[1].t < pair[0].t)
+    {
         return None;
     }
 
-    // Sort points by timestamp just in case
-    let mut points = points.to_vec();
-    points.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Remove duplicates or points with duplicate timestamps
-    let mut unique_points = Vec::new();
-    for p in points {
+    // Preserve event order and remove duplicate timestamps.
+    let mut unique_points = Vec::with_capacity(points.len());
+    for p in points.iter().cloned() {
         if unique_points.is_empty() {
             unique_points.push(p);
         } else {
@@ -98,7 +104,7 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
         if dt > 0.0 {
             speeds.push(dist / dt);
         }
-        
+
         let angle = dy.atan2(dx);
         angles.push(angle);
     }
@@ -125,7 +131,7 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
     let dx_total = end_p.x - start_p.x;
     let dy_total = end_p.y - start_p.y;
     let straight_dist = (dx_total * dx_total + dy_total * dy_total).sqrt();
-    let straightness = (straight_dist / path_length).min(1.0).max(0.0);
+    let straightness = (straight_dist / path_length).clamp(0.0, 1.0);
 
     // 2. Avg speed
     let avg_speed = if !speeds.is_empty() {
@@ -136,12 +142,14 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
 
     // 3. Speed variance
     let speed_var = if speeds.len() > 1 && avg_speed > 0.0 {
-        let variance = speeds.iter()
+        let variance = speeds
+            .iter()
             .map(|&s| {
                 let diff = s - avg_speed;
                 diff * diff
             })
-            .sum::<f32>() / (speeds.len() - 1) as f32;
+            .sum::<f32>()
+            / (speeds.len() - 1) as f32;
         (variance.sqrt() / avg_speed).min(2.0) // Normalize/cap relative standard deviation
     } else {
         0.0
@@ -180,7 +188,7 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
         let b = end_p.x - start_p.x;
         let c = start_p.x * end_p.y - end_p.x * start_p.y;
         let denom = (a * a + b * b).sqrt();
-        
+
         if denom > 0.0 {
             for p in &unique_points {
                 let dist = (a * p.x + b * p.y + c).abs() / denom;
@@ -214,7 +222,7 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
             }
         }
         // Normalize entropy by max possible entropy log(8) ~ 2.079
-        (ent / 2.079).min(1.0).max(0.0)
+        (ent / 2.079).clamp(0.0, 1.0)
     } else {
         0.0
     };
@@ -226,9 +234,14 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
     }
     let accel_var = if !accels.is_empty() {
         let mean_accel = accels.iter().sum::<f32>() / accels.len() as f32;
-        let variance = accels.iter()
-            .map(|&a| { let d = a - mean_accel; d * d })
-            .sum::<f32>() / accels.len() as f32;
+        let variance = accels
+            .iter()
+            .map(|&a| {
+                let d = a - mean_accel;
+                d * d
+            })
+            .sum::<f32>()
+            / accels.len() as f32;
         (variance.sqrt() / (avg_speed.max(0.001))).min(3.0) // normalize by speed
     } else {
         0.0
@@ -308,9 +321,14 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
         }
         if intervals.len() >= 2 {
             let mean_interval = intervals.iter().sum::<f32>() / intervals.len() as f32;
-            let variance = intervals.iter()
-                .map(|&dt| { let d = dt - mean_interval; d * d })
-                .sum::<f32>() / intervals.len() as f32;
+            let variance = intervals
+                .iter()
+                .map(|&dt| {
+                    let d = dt - mean_interval;
+                    d * d
+                })
+                .sum::<f32>()
+                / intervals.len() as f32;
             let std_dev = variance.sqrt();
             (std_dev / mean_interval.max(0.001)).min(2.0)
         } else {
@@ -325,9 +343,9 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
         avg_speed: (avg_speed / 5.0).min(1.0), // normalize: speed of 5px/ms is very fast
         speed_var,
         angular_jitter: (angular_jitter / std::f32::consts::PI).min(1.0), // normalize to [0, 1]
-        total_duration: (total_duration / 2000.0).min(1.0),             // normalize relative to 2 seconds
+        total_duration: (total_duration / 2000.0).min(1.0), // normalize relative to 2 seconds
         line_deviation,
-        point_count: (n as f32 / 50.0).min(1.0),                         // normalize relative to 50 points
+        point_count: (n as f32 / 50.0).min(1.0), // normalize relative to 50 points
         entropy,
         accel_var,
         curvature_change,
@@ -335,4 +353,36 @@ pub fn extract_features(points: &[TelemetryPoint]) -> Option<FeatureVector> {
         dwell_ratio,
         timing_jitter,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_points() -> Vec<TelemetryPoint> {
+        (0..6)
+            .map(|i| TelemetryPoint {
+                x: i as f32 * 10.0,
+                y: (i as f32).sin(),
+                t: i as f64 * 20.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rejects_non_finite_and_out_of_order_points() {
+        let mut points = valid_points();
+        points[2].x = f32::NAN;
+        assert!(extract_features(&points).is_none());
+
+        let mut points = valid_points();
+        points[3].t = 1.0;
+        assert!(extract_features(&points).is_none());
+    }
+
+    #[test]
+    fn extracts_finite_features() {
+        let features = extract_features(&valid_points()).expect("valid feature vector");
+        assert!(features.to_array().into_iter().all(f32::is_finite));
+    }
 }

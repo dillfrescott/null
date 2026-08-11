@@ -1,14 +1,36 @@
-use rusqlite::{params, Connection, Result};
 use crate::model::MiniTransformer;
+use rusqlite::{Connection, Result, params};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub struct TelemetryRecord<'a> {
+    pub point_count: usize,
+    pub score: f32,
+    pub is_human: bool,
+    pub webdriver: bool,
+    pub user_agent: Option<&'a str>,
+    pub ip_address: Option<&'a str>,
+    pub features_json: &'a str,
+    pub points_hash: &'a str,
+    pub is_high_confidence: bool,
+}
+
 pub fn init_db(db_path: &str) -> Result<Connection> {
+    if db_path != ":memory:" {
+        if let Some(parent) = Path::new(db_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|_| rusqlite::Error::InvalidPath(parent.to_path_buf()))?;
+            }
+        }
+    }
     let conn = Connection::open(db_path)?;
 
     // Enable WAL mode and set a busy timeout of 5 seconds to prevent database locked errors
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
-         PRAGMA busy_timeout = 5000;"
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;",
     )?;
 
     // 1. Create table for model weights
@@ -75,9 +97,9 @@ pub fn init_db(db_path: &str) -> Result<Connection> {
 
 /// Save the current model weights and biases to the database
 pub fn save_model(conn: &Connection, model: &MiniTransformer) -> Result<(), String> {
-    let serialized = serde_json::to_string(model)
-        .map_err(|e| format!("Failed to serialize model: {}", e))?;
-    
+    let serialized =
+        serde_json::to_string(model).map_err(|e| format!("Failed to serialize model: {}", e))?;
+
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -97,12 +119,15 @@ pub fn load_model(conn: &Connection) -> Result<Option<MiniTransformer>, String> 
         .prepare("SELECT value FROM model_weights WHERE key = 'current_model_v4_transformer'")
         .map_err(|e| format!("Prepare statement failed: {}", e))?;
 
-    let mut rows = stmt
-        .query([])
-        .map_err(|e| format!("Query failed: {}", e))?;
+    let mut rows = stmt.query([]).map_err(|e| format!("Query failed: {}", e))?;
 
-    if let Some(row) = rows.next().map_err(|e| format!("Row fetching failed: {}", e))? {
-        let val: String = row.get(0).map_err(|e| format!("Get column failed: {}", e))?;
+    if let Some(row) = rows
+        .next()
+        .map_err(|e| format!("Row fetching failed: {}", e))?
+    {
+        let val: String = row
+            .get(0)
+            .map_err(|e| format!("Get column failed: {}", e))?;
         let model: MiniTransformer = serde_json::from_str(&val)
             .map_err(|e| format!("Failed to deserialize model: {}", e))?;
         Ok(Some(model))
@@ -112,18 +137,7 @@ pub fn load_model(conn: &Connection) -> Result<Option<MiniTransformer>, String> 
 }
 
 /// Log telemetry data of a verification request
-pub fn log_telemetry(
-    conn: &Connection,
-    point_count: usize,
-    score: f32,
-    is_human: bool,
-    webdriver: bool,
-    user_agent: Option<&str>,
-    ip_address: Option<&str>,
-    features_json: &str,
-    points_hash: &str,
-    is_high_confidence: bool,
-) -> Result<(), String> {
+pub fn log_telemetry(conn: &Connection, record: &TelemetryRecord<'_>) -> Result<(), String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -134,15 +148,15 @@ pub fn log_telemetry(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             now,
-            point_count as i64,
-            score as f64,
-            if is_human { 1 } else { 0 },
-            if webdriver { 1 } else { 0 },
-            user_agent,
-            ip_address,
-            features_json,
-            points_hash,
-            if is_high_confidence { 1 } else { 0 }
+            record.point_count as i64,
+            record.score as f64,
+            if record.is_human { 1 } else { 0 },
+            if record.webdriver { 1 } else { 0 },
+            record.user_agent,
+            record.ip_address,
+            record.features_json,
+            record.points_hash,
+            if record.is_high_confidence { 1 } else { 0 }
         ],
     ).map_err(|e| format!("Failed to insert telemetry log: {}", e))?;
 
@@ -157,8 +171,9 @@ pub fn is_telemetry_replayed(conn: &Connection, points_hash: &str) -> Result<boo
     let mut stmt = conn
         .prepare("SELECT 1 FROM telemetry_logs WHERE points_hash = ?1 LIMIT 1")
         .map_err(|e| format!("Prepare query failed: {}", e))?;
-    
-    let exists = stmt.exists(params![points_hash])
+
+    let exists = stmt
+        .exists(params![points_hash])
         .map_err(|e| format!("Query points_hash failed: {}", e))?;
 
     Ok(exists)
@@ -194,36 +209,56 @@ pub fn prune_old_tokens(conn: &Connection, max_age_secs: u64) -> Result<usize, S
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    
+
     let cutoff = now - (max_age_secs as i64);
 
-    let deleted = conn.execute(
-        "DELETE FROM used_tokens WHERE validated_at < ?1",
-        params![cutoff],
-    ).map_err(|e| format!("Failed to prune tokens: {}", e))?;
+    let deleted = conn
+        .execute(
+            "DELETE FROM used_tokens WHERE validated_at < ?1",
+            params![cutoff],
+        )
+        .map_err(|e| format!("Failed to prune tokens: {}", e))?;
 
     Ok(deleted)
 }
 
+/// Delete old telemetry to bound database growth and replay-retention time.
+pub fn prune_old_telemetry(conn: &Connection, max_age_secs: u64) -> Result<usize, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let cutoff = now.saturating_sub(max_age_secs.min(i64::MAX as u64) as i64);
+    conn.execute(
+        "DELETE FROM telemetry_logs WHERE timestamp < ?1",
+        params![cutoff],
+    )
+    .map_err(|e| format!("Failed to prune telemetry: {e}"))
+}
+
 /// Get the most recent telemetry logs from the database to use as training data.
-pub fn get_recent_telemetry(conn: &Connection, limit: usize) -> Result<Vec<([f32; 13], f32)>, String> {
+pub fn get_recent_telemetry(
+    conn: &Connection,
+    limit: usize,
+) -> Result<Vec<([f32; 13], f32)>, String> {
     let mut stmt = conn
         .prepare("SELECT features_json, is_human FROM telemetry_logs WHERE is_high_confidence = 1 ORDER BY id DESC LIMIT ?1")
         .map_err(|e| format!("Prepare query failed: {}", e))?;
 
-    let rows = stmt.query_map(params![limit as i64], |row| {
-        let features_json: String = row.get(0)?;
-        let is_human_int: i32 = row.get(1)?;
-        let target = if is_human_int > 0 { 1.0f32 } else { 0.0f32 };
-        Ok((features_json, target))
-    }).map_err(|e| format!("Query telemetry failed: {}", e))?;
+    let rows = stmt
+        .query_map(params![limit as i64], |row| {
+            let features_json: String = row.get(0)?;
+            let is_human_int: i32 = row.get(1)?;
+            let target = if is_human_int > 0 { 1.0f32 } else { 0.0f32 };
+            Ok((features_json, target))
+        })
+        .map_err(|e| format!("Query telemetry failed: {}", e))?;
 
     let mut data = Vec::new();
-    for row in rows {
-        if let Ok((features_json, target)) = row {
-            if let Ok(features) = serde_json::from_str::<crate::features::FeatureVector>(&features_json) {
-                data.push((features.to_array(), target));
-            }
+    for (features_json, target) in rows.flatten() {
+        if let Ok(features) = serde_json::from_str::<crate::features::FeatureVector>(&features_json)
+        {
+            data.push((features.to_array(), target));
         }
     }
     Ok(data)
@@ -237,7 +272,7 @@ mod tests {
     #[test]
     fn test_log_and_get_recent_telemetry_high_confidence() {
         let conn = init_db(":memory:").unwrap();
-        
+
         let features = FeatureVector {
             straightness: 0.8,
             avg_speed: 0.4,
@@ -258,37 +293,42 @@ mod tests {
         // 1. Log a low confidence telemetry entry
         log_telemetry(
             &conn,
-            20,
-            0.9,
-            true,
-            false,
-            Some("Mozilla"),
-            Some("127.0.0.1"),
-            &features_json,
-            "hash1",
-            false, // is_high_confidence
-        ).unwrap();
+            &TelemetryRecord {
+                point_count: 20,
+                score: 0.9,
+                is_human: true,
+                webdriver: false,
+                user_agent: Some("Mozilla"),
+                ip_address: Some("hashed-ip"),
+                features_json: &features_json,
+                points_hash: "hash1",
+                is_high_confidence: false,
+            },
+        )
+        .unwrap();
 
         // 2. Log a high confidence telemetry entry
         log_telemetry(
             &conn,
-            25,
-            0.95,
-            true,
-            false,
-            Some("Mozilla"),
-            Some("127.0.0.1"),
-            &features_json,
-            "hash2",
-            true, // is_high_confidence
-        ).unwrap();
+            &TelemetryRecord {
+                point_count: 25,
+                score: 0.95,
+                is_human: true,
+                webdriver: false,
+                user_agent: Some("Mozilla"),
+                ip_address: Some("hashed-ip"),
+                features_json: &features_json,
+                points_hash: "hash2",
+                is_high_confidence: true,
+            },
+        )
+        .unwrap();
 
         // Retrieve telemetry for training
         let dataset = get_recent_telemetry(&conn, 10).unwrap();
-        
+
         // Assert only the high confidence record is returned
         assert_eq!(dataset.len(), 1);
         assert_eq!(dataset[0].1, 1.0); // is_human target
     }
 }
-
